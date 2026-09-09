@@ -377,10 +377,11 @@ bool TrackingReceiver::GetPredictedPose(oxr::protocol::TrackingPacket& outPacket
     constexpr float kCouplingRampLoRadPerSec = 0.5f;  // below this: no reduction
     constexpr float kCouplingRampHiRadPerSec = 4.0f;  // at/above this: full reduction
     constexpr float kCouplingMinHorizonScale = 0.15f; // floor on the position horizon
-    float couplingT = std::clamp(
-        (headAngularSpeed - kCouplingRampLoRadPerSec) /
-            (kCouplingRampHiRadPerSec - kCouplingRampLoRadPerSec),
-        0.0f, 1.0f);
+    float couplingT = hasHeadAngularVelocity
+        ? std::clamp((headAngularSpeed - kCouplingRampLoRadPerSec) /
+                         (kCouplingRampHiRadPerSec - kCouplingRampLoRadPerSec),
+                     0.0f, 1.0f)
+        : 0.0f;
     float couplingScale = 1.0f - (1.0f - kCouplingMinHorizonScale) * couplingT;
     float headPositionHorizonSeconds = positionHorizonSeconds * couplingScale;
 

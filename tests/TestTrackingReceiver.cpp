@@ -108,6 +108,37 @@ TEST_CASE("Tracking prediction respects explicitly valid stationary measurements
     }
 }
 
+TEST_CASE("Tracking prediction limits head translation during rotation", "[tracking]")
+{
+    for (float angularSpeed : {0.0f, 4.0f})
+    {
+        for (float linearSpeed : {0.0f, 1.0f})
+        {
+            CAPTURE(angularSpeed, linearSpeed);
+            TrackingReceiver receiver;
+            receiver.SetPredictionHorizonMs(20.0f);
+            TrackingPacket first = {};
+            first.timestampNs = 1'000'000'000;
+            first.headOrientation[3] = 1.0f;
+            TrackingPacket second = first;
+            second.timestampNs = 1'010'000'000;
+            second.headPosition[0] = 0.02f;
+            second.headLinearVelocity[0] = linearSpeed;
+            second.headAngularVelocity[1] = angularSpeed;
+            second.trackingFlags = TRACKING_FLAG_HEAD_LINEAR_VELOCITY_VALID |
+                                   TRACKING_FLAG_HEAD_ANGULAR_VELOCITY_VALID;
+
+            receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&first), sizeof(first));
+            receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&second), sizeof(second));
+            TrackingPacket predicted = {};
+            REQUIRE(receiver.GetPredictedPose(predicted));
+            const float horizonSeconds = angularSpeed == 0.0f ? 0.01f : 0.0015f;
+            CHECK_THAT(predicted.headPosition[0],
+                       WithinAbs(second.headPosition[0] + linearSpeed * horizonSeconds, 1e-6f));
+        }
+    }
+}
+
 TEST_CASE("Tracking prediction rejects nonfinite reported velocity and retains legacy fallback", "[tracking]")
 {
     for (float value : {std::numeric_limits<float>::quiet_NaN(),
@@ -139,6 +170,7 @@ TEST_CASE("Tracking prediction rejects nonfinite reported velocity and retains l
             TrackingPacket predicted = {};
             REQUIRE(receiver.GetPredictedPose(predicted));
             CHECK(predicted.headPosition[0] > second.headPosition[0]);
+            CHECK_THAT(predicted.headPosition[0], WithinAbs(0.04f, 1e-6f));
             CHECK(predicted.headOrientation[1] > second.headOrientation[1]);
             for (float component : predicted.headPosition)
             {
