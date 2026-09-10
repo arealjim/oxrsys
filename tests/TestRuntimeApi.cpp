@@ -1178,6 +1178,10 @@ TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runt
     XrSpace viewSpace = XR_NULL_HANDLE;
     XR_CHECK(xrCreateReferenceSpace(context.session, &createInfo, &viewSpace));
 
+    createInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
+    XrSpace stageSpace = XR_NULL_HANDLE;
+    XR_CHECK(xrCreateReferenceSpace(context.session, &createInfo, &stageSpace));
+
     XrExtent2Df bounds = {123.0f, 456.0f};
     CHECK(xrGetReferenceSpaceBoundsRect(context.session, XR_REFERENCE_SPACE_TYPE_STAGE, &bounds) ==
           XR_SPACE_BOUNDS_UNAVAILABLE);
@@ -1185,7 +1189,7 @@ TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runt
     CHECK(bounds.height == 0.0f);
     XrSpaceVelocity velocity = {XR_TYPE_SPACE_VELOCITY};
     XrSpaceLocation location = {XR_TYPE_SPACE_LOCATION, &velocity};
-    XR_CHECK(xrLocateSpace(viewSpace, context.localSpace, 1, &location));
+    XR_CHECK(xrLocateSpace(viewSpace, stageSpace, 1, &location));
     CHECK(velocity.velocityFlags == 0);
     CHECK(CountStageChanges(context) == 0);
 
@@ -1211,7 +1215,7 @@ TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runt
 
     auto readTracking = [&] {
         sampleTime = PumpTrackingFrame(context.session);
-        XR_CHECK(xrLocateSpace(viewSpace, context.localSpace, sampleTime, &location));
+        XR_CHECK(xrLocateSpace(viewSpace, stageSpace, sampleTime, &location));
         boundsResult = xrGetReferenceSpaceBoundsRect(context.session, XR_REFERENCE_SPACE_TYPE_STAGE, &bounds);
     };
     auto waitForPacket = [&](size_t size, auto matches) {
@@ -1239,7 +1243,7 @@ TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runt
     CHECK_THAT(velocity.angularVelocity.z, WithinAbs(-0.75f, 0.0001f));
     CHECK(CountStageChanges(context) == 1);
 
-    std::array<XrSpace, 2> spaces = {viewSpace, context.localSpace};
+    std::array<XrSpace, 2> spaces = {viewSpace, stageSpace};
     std::array<XrSpaceLocationData, 2> locationData = {};
     std::array<XrSpaceVelocityData, 2> velocityData = {};
     XrSpaceVelocities velocities = {XR_TYPE_SPACE_VELOCITIES};
@@ -1249,7 +1253,7 @@ TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runt
     locations.locationCount = static_cast<uint32_t>(locationData.size());
     locations.locations = locationData.data();
     XrSpacesLocateInfo locateInfo = {XR_TYPE_SPACES_LOCATE_INFO};
-    locateInfo.baseSpace = context.localSpace;
+    locateInfo.baseSpace = stageSpace;
     locateInfo.time = sampleTime;
     locateInfo.spaceCount = static_cast<uint32_t>(spaces.size());
     locateInfo.spaces = spaces.data();
@@ -1258,7 +1262,7 @@ TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runt
     {
         XrSpaceVelocity singleVelocity = {XR_TYPE_SPACE_VELOCITY};
         XrSpaceLocation singleLocation = {XR_TYPE_SPACE_LOCATION, &singleVelocity};
-        XR_CHECK(xrLocateSpace(spaces[i], context.localSpace, sampleTime, &singleLocation));
+        XR_CHECK(xrLocateSpace(spaces[i], stageSpace, sampleTime, &singleLocation));
         CHECK(velocityData[i].velocityFlags == singleVelocity.velocityFlags);
         CHECK(velocityData[i].linearVelocity.x == singleVelocity.linearVelocity.x);
         CHECK(velocityData[i].linearVelocity.y == singleVelocity.linearVelocity.y);
@@ -1316,7 +1320,7 @@ TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runt
     do
     {
         boundsResult = xrGetReferenceSpaceBoundsRect(context.session, XR_REFERENCE_SPACE_TYPE_STAGE, &bounds);
-        XR_CHECK(xrLocateSpace(viewSpace, context.localSpace, sampleTime, &location));
+        XR_CHECK(xrLocateSpace(viewSpace, stageSpace, sampleTime, &location));
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     } while ((boundsResult != XR_SPACE_BOUNDS_UNAVAILABLE || velocity.velocityFlags != 0) &&
              std::chrono::steady_clock::now() < deadline);
@@ -1332,7 +1336,7 @@ TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runt
         {
             peer.SendTracking(packet, sizeof(packet));
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            XR_CHECK(xrLocateSpace(viewSpace, context.localSpace, sampleTime, &location));
+            XR_CHECK(xrLocateSpace(viewSpace, stageSpace, sampleTime, &location));
             CHECK(velocity.velocityFlags == 0);
             CHECK(xrGetReferenceSpaceBoundsRect(context.session, XR_REFERENCE_SPACE_TYPE_STAGE, &bounds) ==
                   XR_SPACE_BOUNDS_UNAVAILABLE);
@@ -1340,6 +1344,7 @@ TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runt
         CHECK(CountStageChanges(context) == 0);
     }
 
+    XR_CHECK(xrDestroySpace(stageSpace));
     XR_CHECK(xrDestroySpace(viewSpace));
 }
 

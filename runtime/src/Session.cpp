@@ -22,47 +22,8 @@
 #include <thread>
 #include <utility>
 
-#include <glm/glm.hpp>
-#include <glm/gtc/quaternion.hpp>
-
 namespace
 {
-glm::quat ToGlmQuat(const XrQuaternionf& q) { return glm::quat(q.w, q.x, q.y, q.z); }
-glm::vec3 ToGlmVec(const XrVector3f& v) { return glm::vec3(v.x, v.y, v.z); }
-XrQuaternionf ToXrQuat(const glm::quat& q) { return {q.x, q.y, q.z, q.w}; }
-XrVector3f ToXrVec(const glm::vec3& v) { return {v.x, v.y, v.z}; }
-
-// World-space pose of a reference space's origin (mirrors Space.cpp GetWorldPose
-// for the reference-space case, including the space's own poseInSpace offset).
-XrPosef ReferenceSpaceWorldPose(Space* space, const InputManager& inputManager)
-{
-    XrPosef pose{};
-    pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
-    pose.position = {0.0f, 0.0f, 0.0f};
-
-    if (space->GetType() == Space::Type::Reference)
-    {
-        if (space->GetReferenceSpaceType() == XR_REFERENCE_SPACE_TYPE_VIEW)
-        {
-            pose = inputManager.GetHeadPose();
-        }
-        else
-        {
-            pose = inputManager.GetReferenceSpacePose(space->GetReferenceSpaceType());
-        }
-    }
-
-    // Apply the space's own offset pose (poseInReferenceSpace).
-    const XrPosef& offset = space->GetPoseInSpace();
-    glm::quat worldRot = ToGlmQuat(pose.orientation);
-    glm::vec3 worldPos = ToGlmVec(pose.position);
-    glm::quat offsetRot = ToGlmQuat(offset.orientation);
-    glm::vec3 offsetPos = ToGlmVec(offset.position);
-    pose.orientation = ToXrQuat(worldRot * offsetRot);
-    pose.position = ToXrVec(worldPos + worldRot * offsetPos);
-    return pose;
-}
-
 using Clock = std::chrono::steady_clock;
 
 // CLOCK_MONOTONIC in nanoseconds — the clock XR_KHR_convert_timespec_time
@@ -962,19 +923,6 @@ XrResult Session::LocateViews(const XrViewLocateInfo* viewLocateInfo, XrViewStat
     for (uint32_t i = 0; i < 2; ++i)
     {
         views[i].pose = baseSpace->LocateWorldPose(views[i].pose).pose;
-    }
-
-    // Express the STAGE-absolute eye poses relative to the requested base space
-    // (identity for a STAGE base at the default zero offset).
-    const XrPosef basePose = ReferenceSpaceWorldPose(baseSpace, *inputManager_);
-    const glm::quat baseRotInv = glm::inverse(ToGlmQuat(basePose.orientation));
-    const glm::vec3 basePos = ToGlmVec(basePose.position);
-    for (uint32_t i = 0; i < 2; ++i)
-    {
-        glm::quat viewRot = ToGlmQuat(views[i].pose.orientation);
-        glm::vec3 viewPos = ToGlmVec(views[i].pose.position);
-        views[i].pose.orientation = ToXrQuat(baseRotInv * viewRot);
-        views[i].pose.position = ToXrVec(baseRotInv * (viewPos - basePos));
     }
 
     // Remember the exact head pose this frame is being rendered for, so the streamed frame can be
