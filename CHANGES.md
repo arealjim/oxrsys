@@ -119,6 +119,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
   output. The Android VR client now sets the Qualcomm decode-order and low-latency MediaCodec keys,
   which brings H.264 decode on Quest 3 to about 11 ms.
 - Fixed Quest stale video becoming head-locked after 120 ms by preserving the held frame's render pose until replacement or disconnect.
+- Fixed Quest decoder input failures being ignored by checking queue submission errors and requesting a rate-limited recovery keyframe.
 - Fixed an `x86_64` runtime under Rosetta silently encoding H.265 on VideoToolbox's software
   encoder (about 20-34 ms per frame, over the 11.1 ms budget at 90 Hz) with nothing in the log to
   say so. H.265 now reaches the hardware encoder through the native `arm64` helper.
