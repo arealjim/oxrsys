@@ -67,6 +67,8 @@ public:
     XrResult CreateReferenceSpace(const XrReferenceSpaceCreateInfo* createInfo, XrSpace* space);
     XrResult CreateActionSpace(XrAction action, XrPath subactionPath, const XrPosef& poseInSpace, XrSpace* space);
     XrResult DestroySpace(Space* space);
+    XrResult GetStageBounds(XrExtent2Df* bounds);
+    bool HasTrackingConnection() const;
 
     // Input manager access
     InputManager& GetInputManager()
@@ -136,6 +138,9 @@ private:
     std::mutex stateTransitionMutex_;
     int endFrameAdvanceDelayUs_ = 0; // test seam, see Session constructor
     mutable std::mutex debugUtilsMutex_;
+    std::mutex stageBoundsMutex_;
+    XrExtent2Df stageBounds_ = {};
+    bool stageBoundsAvailable_ = false;
 
     std::unique_ptr<InputManager> inputManager_;
     std::unique_ptr<StreamingServer> streamingServer_;

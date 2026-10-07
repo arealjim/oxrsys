@@ -1226,7 +1226,7 @@ void StreamingServer::TcpTrackingThread()
                 break;
             }
             if (header.type == oxr::protocol::TcpRecordType::Tracking &&
-                payload.size() >= sizeof(oxr::protocol::TrackingPacket) &&
+                payload.size() >= oxr::protocol::TRACKING_PACKET_BASE_SIZE &&
                 trackingReceiver_ != nullptr)
             {
                 trackingReceiver_->InjectPacket(payload.data(), payload.size());
@@ -2124,6 +2124,10 @@ void StreamingServer::HandleClientDisconnect()
     {
         return;
     }
+    if (trackingReceiver_ != nullptr)
+    {
+        trackingReceiver_->Reset();
+    }
     InvalidateCallbackAccess();
 
     {
@@ -2207,10 +2211,6 @@ void StreamingServer::HandleClientDisconnect()
     }
 
     RuntimeStatus::SetIdle();
-    if (trackingReceiver_)
-    {
-        trackingReceiver_->ResetHistory();
-    }
     spdlog::info("StreamingServer: Client disconnected, resuming broadcast");
 }
 
