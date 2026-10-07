@@ -14,7 +14,7 @@
 
 #include "PacketPacer.h"
 
-#include <oxrsys/protocol/Protocol.h>
+#include <Protocol.h>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>

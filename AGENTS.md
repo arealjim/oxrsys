@@ -195,7 +195,7 @@ oxrsys_runtime/
 │   └── shared/
 │       ├── OXRSysStreaming/
 │       └── OXRSysSimulator/
-├── common/protocol/include/oxrsys/protocol/
+├── common/
 ├── scripts/
 ├── tests/
 └── docs/
