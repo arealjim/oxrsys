@@ -2915,10 +2915,17 @@ TEST_CASE("Swapchain creation validates supported flags and compatible usage",
 
     swapchain = reinterpret_cast<XrSwapchain>(static_cast<uintptr_t>(0x1));
     createInfo.createFlags = 0;
-    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
-    CHECK(xrCreateSwapchain(context.session, &createInfo, &swapchain) ==
-          XR_ERROR_FEATURE_UNSUPPORTED);
-    CHECK(swapchain == XR_NULL_HANDLE);
+    // Godot's Metal driver renders through an sRGB/UNORM view of the swapchain texture.
+    createInfo.format = 71; // MTLPixelFormatRGBA8Unorm_sRGB, Godot 4 Metal's first match.
+    createInfo.arraySize = 2;
+    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
+                            XR_SWAPCHAIN_USAGE_SAMPLED_BIT |
+                            XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
+    XR_CHECK(xrCreateSwapchain(context.session, &createInfo, &swapchain));
+    REQUIRE(swapchain != XR_NULL_HANDLE);
+    XR_CHECK(xrDestroySwapchain(swapchain));
+    createInfo.format = 70;
+    createInfo.arraySize = 1;
 
     swapchain = reinterpret_cast<XrSwapchain>(static_cast<uintptr_t>(0x1));
     createInfo.createFlags = 0;
