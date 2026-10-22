@@ -51,6 +51,9 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green lo
   application-provided dispatch path. Vulkan v1 may fall back only to an already-loaded process
   `vkGetInstanceProcAddr` through `dlsym(RTLD_DEFAULT, ...)`.
 - `Session::EndFrame()` must remain non-blocking.
+- Session-state transitions driven by frame submission and by `xrRequestExitSession` share one
+  short-held mutex. A session that never ran a frame loop goes straight to `STOPPING` on an exit
+  request.
 - Encoded-frame dispatch is bounded and latest-frame-oriented. Replacing a pending frame must
   release its `FrameSource` resources; backpressure must never run in VideoToolbox callbacks or
   `Session::EndFrame()`.
@@ -61,6 +64,9 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green lo
   their rendered view into the runtime-owned texture before releasing it.
 - Vulkan swapchains accept `XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT` and create those images with
   `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`; Godot renders through an sRGB view of UNORM images.
+- Metal swapchains accept `XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT` and create those textures with
+  `MTLTextureUsagePixelFormatView`; Godot's Metal driver renders through an sRGB/UNORM view of
+  the swapchain texture.
 - Vulkan streaming snapshots released color images with application-dispatched Vulkan functions
   into bounded exportable images. Queue submission is non-blocking; fence waits belong to the
   encoder worker. Missing export support, exhausted slots, or wait failures drop the streaming frame

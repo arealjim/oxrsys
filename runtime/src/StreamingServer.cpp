@@ -1636,6 +1636,13 @@ void StreamingServer::EncodeThread()
 void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& clientConnect,
                                           const sockaddr_in& clientAddr)
 {
+    // A new client brings a new clock; drop the previous client's tracking history so its
+    // last timestamp cannot shadow every packet of this one (see TrackingReceiver::ResetHistory).
+    if (trackingReceiver_)
+    {
+        trackingReceiver_->ResetHistory();
+    }
+
     char ipStr[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &clientAddr.sin_addr, ipStr, sizeof(ipStr));
     std::string clientName(clientConnect.deviceName,
@@ -1860,6 +1867,12 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
 
 void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect& clientConnect)
 {
+    // Same as HandleClientConnect: a new client brings a new clock.
+    if (trackingReceiver_)
+    {
+        trackingReceiver_->ResetHistory();
+    }
+
     std::string clientName(clientConnect.deviceName,
         BoundedStringLength(clientConnect.deviceName, sizeof(clientConnect.deviceName)));
     {
@@ -2187,6 +2200,10 @@ void StreamingServer::HandleClientDisconnect()
     }
 
     RuntimeStatus::SetIdle();
+    if (trackingReceiver_)
+    {
+        trackingReceiver_->ResetHistory();
+    }
     spdlog::info("StreamingServer: Client disconnected, resuming broadcast");
 }
 
