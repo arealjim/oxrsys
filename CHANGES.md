@@ -71,6 +71,10 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed foveated encoding dropping every frame when an app renders its eye textures at a size
+  other than the target eye size (for example The Lab at 1600x1777 for a 1512x1680 Quest 3 eye).
+  The foveation kernel samples in normalized coordinates, so a source eye is now accepted when its
+  aspect ratio is within 1% of the target.
 - Fixed `xrRequestExitSession` stalling when the app never ran a frame loop. Exit advanced one state
   per submitted frame, so a session still in `READY` never reached `STOPPING`; OpenComposite (for
   example Arizona Sunshine under Wine) waited out its timeout and re-initialised. Such a session now
