@@ -71,6 +71,11 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed a headset that connects after another client, such as the desktop simulator, losing every
+  tracking packet as "reordered" and being disconnected by the liveness watchdog. Clients do not
+  share a clock, and the reorder guard compared the new client's timestamps against the previous
+  client's last one; the tracking history is now reset on every client connect and disconnect.
+
 - Fixed Vulkan apps that render through an sRGB view of a UNORM swapchain image, such as Godot 4,
   failing at `xrCreateSwapchain` with `XR_ERROR_FEATURE_UNSUPPORTED`. Vulkan swapchains now accept
   `XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT` and create images with `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`.
