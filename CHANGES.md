@@ -71,6 +71,11 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed `StreamingServer::Stop` closing the UDP video socket while the video send thread or the
+  control thread could still be sending through it. Both copy the socket handle and then send a
+  run of datagrams (a NAL unit's data and FEC parity, or a NACK's retransmits) through the copy, so
+  the rest of the run could reach a closed descriptor, or one the kernel had already reused. The
+  video socket is now closed after those threads are joined.
 - Fixed foveated encoding dropping every frame when an app renders its eye textures at a size
   other than the target eye size (for example The Lab at 1600x1777 for a 1512x1680 Quest 3 eye).
   The foveation kernel samples in normalized coordinates, so a source eye is now accepted when its

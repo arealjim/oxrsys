@@ -783,9 +783,10 @@ bool StreamingServer::Stop(std::chrono::nanoseconds timeout)
         clientUsesUsbAdb_.store(false);
     }
 
+    // Closing these two wakes the broadcast and control threads. The video socket is closed
+    // only after the threads that send through it have been joined, below.
     oxrsys::runtime_socket::Close(broadcastSocket_);
     oxrsys::runtime_socket::Close(controlSocket_);
-    oxrsys::runtime_socket::Close(videoSocket_);
 
     {
         std::lock_guard<std::mutex> broadcastLock(broadcastThreadMutex_);
@@ -798,6 +799,12 @@ bool StreamingServer::Stop(std::chrono::nanoseconds timeout)
     JoinWorkerThread(tcpVideoThread_, "USB video");
     JoinWorkerThread(tcpTrackingThread_, "USB tracking");
     JoinWorkerThread(tcpSpatialThread_, "USB spatial");
+    // The video send thread (frames, render poses) and the control thread (NACK
+    // retransmits) each copy this handle from the packet dispatch state and then send
+    // a run of datagrams through the copy. Closing it while either is mid-run sends the
+    // rest into a closed descriptor, or into whatever the kernel has since given that
+    // number to. Nothing waits on it, so nothing needs the close to wake.
+    oxrsys::runtime_socket::Close(videoSocket_);
     frameQueue_.Clear();
     ClearVideoSendQueue();
 
