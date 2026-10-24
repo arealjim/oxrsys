@@ -199,7 +199,15 @@ static bool CreateInstance(App& app)
     ci.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 1, 0);
     ci.enabledExtensionCount = (uint32_t)enabled.size();
     ci.enabledExtensionNames = enabled.data();
-    XR_CHECK(xrCreateInstance(&ci, &app.instance));
+    // SteamVR on the Steam Frame rejects a 1.1 apiVersion with
+    // XR_ERROR_API_VERSION_UNSUPPORTED; nothing this client uses needs 1.1, so retry at 1.0.
+    XrResult r = xrCreateInstance(&ci, &app.instance);
+    if (r == XR_ERROR_API_VERSION_UNSUPPORTED) {
+        LOG_INFO("runtime rejected OpenXR 1.1.0; retrying with 1.0.0");
+        ci.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
+        r = xrCreateInstance(&ci, &app.instance);
+    }
+    XR_CHECK(r);
     LOG_INFO("hand tracking: %s, eye gaze: %s",
              app.hasHandTracking ? "enabled" : "unavailable",
              app.hasEyeGaze ? "enabled" : "unavailable");
