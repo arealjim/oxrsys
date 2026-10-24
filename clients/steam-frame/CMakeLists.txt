@@ -79,6 +79,8 @@ add_executable(steam_frame_client_tests
     tests/test_video_decoder.cpp
     tests/test_protocol_fec.cpp
     tests/test_foveation.cpp
+    tests/test_receiver.cpp
+    src/NetworkReceiver.cpp
     src/video_decoder.cpp)
 target_include_directories(steam_frame_client_tests PRIVATE
     ${OXRSYS_PROTO_INC} ${OXRSYS_STREAMING_INC} ${CMAKE_CURRENT_SOURCE_DIR}/src)

@@ -9,12 +9,14 @@ int g_checks = 0;
 void test_video_decoder();
 void test_protocol_fec();
 void test_foveation();
+void test_receiver();
 
 int main()
 {
     test_video_decoder();
     test_protocol_fec();
     test_foveation();
+    test_receiver();
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

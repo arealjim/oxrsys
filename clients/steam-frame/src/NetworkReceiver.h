@@ -134,6 +134,17 @@ private:
     RenderPose latestRenderPose_;
     std::deque<RenderPose> renderPoses_;
     static constexpr size_t MaxRenderPoses = 128;
+    // Untrusted input bounds: totalPackets sizes the reassembly buffer, so one datagram could
+    // otherwise ask for 65535 x 1400 B. 4096 packets is 5.7 MB per NAL.
+    static constexpr uint32_t kMaxPacketsPerFrame = 4096;
+    // The server video comes from (network order); 0 = not known, accept any source.
+    std::atomic<uint32_t> videoServerAddr_{0};
+public:
+    // A render pose from the wire goes straight into xrEndFrame, where a NaN or a non-unit
+    // quaternion fails the frame (XR_ERROR_POSE_INVALID). True if it is finite, within 100 m
+    // and has a quaternion norm within 10 % of 1; the quaternion is then normalised.
+    static bool SanitizePose(float position[3], float orientation[4]);
+private:
 };
 
 } // namespace oxr

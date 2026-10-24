@@ -3,10 +3,12 @@
 #include "NetworkReceiver.h"
 
 #include <cstdio>
+#include <cmath>
 #include <array>
 #include <algorithm>
 #include <arpa/inet.h>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <cerrno>
 #include <iterator>
@@ -161,7 +163,12 @@ bool NetworkReceiver::StartReceiving(const char* serverIp, uint16_t videoPort,
                                      OnNalUnitCallback callback,
                                      OnConnectionLostCallback connectionLostCallback)
 {
-    (void)serverIp;
+    // The socket binds every interface; only the connected server's datagrams are video.
+    // FRAME_CLIENT_ACCEPT_ANY_SOURCE=1 restores the old behaviour.
+    in_addr srvAddr = {};
+    const char* any = getenv("FRAME_CLIENT_ACCEPT_ANY_SOURCE");
+    videoServerAddr_.store((serverIp && !(any && atoi(any) != 0) && inet_pton(AF_INET, serverIp, &srvAddr) == 1)
+                               ? srvAddr.s_addr : 0);
 
     videoSocket_ = socket(AF_INET, SOCK_DGRAM, 0);
     if (videoSocket_ < 0)
@@ -284,9 +291,23 @@ void NetworkReceiver::ReceiveThread(OnNalUnitCallback callback)
     timeval tv = {0, 1000};  // 1ms timeout — low latency packet receive
     setsockopt(videoSocket_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
+    uint32_t foreign = 0, malformed = 0;
     while (receiving_.load())
     {
-        ssize_t received = recv(videoSocket_, buffer, sizeof(buffer), 0);
+        sockaddr_in from = {};
+        socklen_t fromLen = sizeof(from);
+        ssize_t received = recvfrom(videoSocket_, buffer, sizeof(buffer), 0, (sockaddr*)&from, &fromLen);
+        const uint32_t server = videoServerAddr_.load();
+        if (received > 0 && server != 0 && from.sin_addr.s_addr != server)
+        {
+            if (++foreign <= 5 || foreign % 1000 == 0)
+            {
+                char who[INET_ADDRSTRLEN] = {};
+                inet_ntop(AF_INET, &from.sin_addr, who, sizeof(who));
+                LOGE("Dropped video datagram from %s (not the server; %u so far)", who, foreign);
+            }
+            continue;
+        }
         if (received < (ssize_t)sizeof(protocol::VideoPacketHeader))
         {
             continue;
@@ -313,6 +334,21 @@ void NetworkReceiver::ReceiveThread(OnNalUnitCallback callback)
         if (header->flags & protocol::VIDEO_FLAG_RENDER_POSE)
         {
             StoreRenderPose(*header, payload, payloadSize);
+            continue;
+        }
+
+        // Bound the header before the assembler sizes anything from it. Parity packets carry
+        // their group index in packetIndex, so only data packets get the index check.
+        if (header->totalPackets == 0 || header->totalPackets > kMaxPacketsPerFrame ||
+            header->payloadSize > protocol::MAX_PACKET_PAYLOAD ||
+            (!(header->flags & protocol::VIDEO_FLAG_FEC) && header->packetIndex >= header->totalPackets))
+        {
+            if (++malformed <= 5 || malformed % 1000 == 0)
+            {
+                LOGE("Dropped malformed video header: frame=%u pkt=%u/%u payload=%u (%u so far)",
+                     header->frameIndex, header->packetIndex, header->totalPackets,
+                     (unsigned)header->payloadSize, malformed);
+            }
             continue;
         }
 
@@ -401,6 +437,10 @@ void NetworkReceiver::StoreRenderPose(const protocol::VideoPacketHeader& header,
     pose.presentationTimeUs = header.presentationTimeNs / 1000;
     memcpy(pose.position, poseData, sizeof(float) * 3);
     memcpy(pose.orientation, poseData + 3, sizeof(float) * 4);
+    if (!SanitizePose(pose.position, pose.orientation))
+    {
+        return;
+    }
     if (header.flags & protocol::VIDEO_FLAG_FOVEATION_CENTER)
     {
         pose.hasFoveationCenter = true;
@@ -436,6 +476,10 @@ void NetworkReceiver::StoreRenderPose(const protocol::TcpRenderPose& tcpPose)
     pose.presentationTimeUs = tcpPose.presentationTimeNs / 1000;
     memcpy(pose.position, tcpPose.position, sizeof(float) * 3);
     memcpy(pose.orientation, tcpPose.orientation, sizeof(float) * 4);
+    if (!SanitizePose(pose.position, pose.orientation))
+    {
+        return;
+    }
     pose.hasFoveationCenter = tcpPose.hasFoveationCenter != 0;
     pose.foveationCenterX = tcpPose.foveationCenterX;
     pose.foveationCenterY = tcpPose.foveationCenterY;
@@ -458,6 +502,24 @@ void NetworkReceiver::StoreRenderPose(const protocol::TcpRenderPose& tcpPose)
     {
         renderPoses_.pop_front();
     }
+}
+
+bool NetworkReceiver::SanitizePose(float position[3], float orientation[4])
+{
+    for (int i = 0; i < 3; i++)
+    {
+        if (!std::isfinite(position[i]) || std::fabs(position[i]) > 100.0f) return false;
+    }
+    float n2 = 0.0f;
+    for (int i = 0; i < 4; i++)
+    {
+        if (!std::isfinite(orientation[i])) return false;
+        n2 += orientation[i] * orientation[i];
+    }
+    const float n = std::sqrt(n2);
+    if (n < 0.9f || n > 1.1f) return false;
+    for (int i = 0; i < 4; i++) orientation[i] /= n;
+    return true;
 }
 
 NetworkReceiver::RenderPose NetworkReceiver::GetLatestRenderPose() const
