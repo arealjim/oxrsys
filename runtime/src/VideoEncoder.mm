@@ -17,6 +17,8 @@
 
 #import <spdlog/spdlog.h>
 
+#include "EncoderSessionKind.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -999,12 +1001,23 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     // unconditional is what made a Rosetta host silently get the ~27-40ms/frame
     // software HEVC encoder; now that path is entered knowingly, logged, and
     // (when the helper covers the codec) only as the fallback behind it.
-    NSDictionary* encoderSpec = @{
+    NSMutableDictionary* encoderSpec = [@{
         (NSString*)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder:
             forceSoftware ? @NO : @YES,
         (NSString*)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder:
             hardwareInProcess ? @YES : @NO,
-    };
+    } mutableCopy];
+    // Low-latency rate control (encoder_low_latency) is a property of the hardware
+    // encoder: no look-ahead, output as soon as the frame is coded; the periodic
+    // keyframe still comes from EncodeThread. The relaxed retry below drops it with
+    // the hardware requirement, so a session whose encoder cannot do it still
+    // comes up, loudly.
+    const bool lowLatencyRequested = initialConfig.encoderLowLatency && !forceSoftware;
+    if (lowLatencyRequested)
+    {
+        encoderSpec[(NSString*)kVTVideoEncoderSpecification_EnableLowLatencyRateControl] = @YES;
+    }
+    bool lowLatencyActive = lowLatencyRequested;
 
     VTCompressionSessionRef compressionSession = nullptr;
     OSStatus status = VTCompressionSessionCreate(
@@ -1018,14 +1031,16 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         CompressionOutputCallback,
         nullptr,
         &compressionSession);
-    if (status != noErr && hardwareInProcess)
+    if (status != noErr && (hardwareInProcess || lowLatencyRequested))
     {
         // The query promised a hardware encoder and the create still refused it.
         // Retry without the requirement rather than failing the session: a slow
         // encoder beats no video. Loudly, because it should not happen.
         spdlog::warn("VideoEncoder: hardware-required compression session failed ({}) although a "
-                     "hardware {} encoder was reported - retrying without the requirement",
-                     status, VideoCodecName(codec_));
+                     "hardware {} encoder was reported - retrying without the requirement{}",
+                     status, VideoCodecName(codec_),
+                     lowLatencyRequested ? " (and without low-latency rate control)" : "");
+        lowLatencyActive = false;
         NSDictionary* relaxedSpec = @{
             (NSString*)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: @YES,
             (NSString*)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: @NO,
@@ -1129,6 +1144,25 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         kVTCompressionPropertyKey_MaxFrameDelayCount, delayRef);
     CFRelease(delayRef);
 
+    // A QP floor below VideoToolbox's own lets the low-latency session spend the
+    // bitrate it is given (Config.h encoder_min_qp); 0 leaves the encoder's floor.
+    if (config.encoderMinQp > 0)
+    {
+        int minQp = (int)config.encoderMinQp;
+        CFNumberRef minQpRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &minQp);
+        const OSStatus minQpStatus = VTSessionSetProperty(compressionSession,
+            kVTCompressionPropertyKey_MinAllowedFrameQP, minQpRef);
+        CFRelease(minQpRef);
+        if (minQpStatus == noErr)
+        {
+            spdlog::info("VideoEncoder: minimum frame QP {} (encoder_min_qp)", minQp);
+        }
+        else
+        {
+            spdlog::warn("VideoEncoder: encoder_min_qp {} refused by this session ({})", minQp, minQpStatus);
+        }
+    }
+
     VTCompressionSessionPrepareToEncodeFrames(compressionSession);
     {
         std::lock_guard<std::mutex> sessionLock(videoToolboxSessionMutex_);
@@ -1139,21 +1173,47 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     // RequireHardware=NO meant a Rosetta host ran the software HEVC encoder with
     // nothing in the log to say so; a line here makes that impossible.
     {
-        bool sessionUsesHardware = false;
         CFBooleanRef hardwareRef = nullptr;
-        if (VTSessionCopyProperty(compressionSession,
-                                  kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
-                                  kCFAllocatorDefault, &hardwareRef) == noErr &&
-            hardwareRef != nullptr)
+        const OSStatus hardwareQuery = VTSessionCopyProperty(compressionSession,
+            kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
+            kCFAllocatorDefault, &hardwareRef);
+        const bool hardwareQueryAnswered = hardwareQuery == noErr && hardwareRef != nullptr;
+        bool hardwareQueryValue = false;
+        if (hardwareRef != nullptr)
         {
-            sessionUsesHardware = CFBooleanGetValue(hardwareRef);
+            hardwareQueryValue = CFBooleanGetValue(hardwareRef);
             CFRelease(hardwareRef);
+        }
+        std::string encoderId;
+        CFStringRef encoderIdRef = nullptr;
+        if (VTSessionCopyProperty(compressionSession, kVTCompressionPropertyKey_EncoderID,
+                                  kCFAllocatorDefault, &encoderIdRef) == noErr &&
+            encoderIdRef != nullptr)
+        {
+            if (const char* utf8 = [(__bridge NSString*)encoderIdRef UTF8String])
+            {
+                encoderId = utf8;
+            }
+            CFRelease(encoderIdRef);
+        }
+        // The low-latency (rtvc) hardware session answers the hardware query with
+        // kVTPropertyNotSupportedErr; the encoder id settles it (EncoderSessionKind.h).
+        const oxrsys::EncoderSessionKind sessionKind =
+            oxrsys::ClassifyEncoderSession(hardwareQueryAnswered, hardwareQueryValue, encoderId);
+        const bool sessionUsesHardware = sessionKind == oxrsys::EncoderSessionKind::Hardware;
+        inProcessSessionKeepsVideoRange_ =
+            oxrsys::SessionWritesVideoRangeFromBGRA(sessionKind, encoderId);
+        if (!hardwareQueryAnswered)
+        {
+            spdlog::info("VideoEncoder: hardware query unsupported on this session (status {}), "
+                         "classified from encoder id '{}'",
+                         hardwareQuery, encoderId.empty() ? "?" : encoderId);
         }
         inProcessSessionHardware_ = sessionUsesHardware;
         if (sessionUsesHardware)
         {
-            spdlog::info("VideoEncoder: in-process {} session is hardware-accelerated",
-                         VideoCodecName(codec_));
+            spdlog::info("VideoEncoder: in-process {} session is hardware-accelerated ({})",
+                         VideoCodecName(codec_), encoderId.empty() ? "?" : encoderId);
         }
         else if (encodePath_.useHelper)
         {
@@ -1175,7 +1235,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     // and this session takes over mid-stream. Hand it an explicitly video-range
     // 4:2:0 conversion of each frame instead; see EncoderSessionColor.h. Set up
     // now, not on helper death, so the fallback never allocates on the frame path.
-    if (!inProcessSessionHardware_ && !CreateVideoRangeConversion(width, height))
+    if (!inProcessSessionKeepsVideoRange_ && !CreateVideoRangeConversion(width, height))
     {
         spdlog::warn("VideoEncoder: could not set up the video-range conversion for the software "
                      "{} session - its stream may signal full range",
@@ -1195,8 +1255,9 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
 
     initialized_ = true;
 
-    spdlog::info("VideoEncoder: Initialized {} encoder {}x{} @ {}fps, {}Mbps (slots={}, keyframe={}s, preset={})",
-                  VideoCodecName(codec_), width, height, fps, bitrateMbps, SlotCount, keyframeIntervalSec, preset);
+    spdlog::info("VideoEncoder: Initialized {} encoder {}x{} @ {}fps, {}Mbps (slots={}, keyframe={}s, preset={}, low_latency={})",
+                  VideoCodecName(codec_), width, height, fps, bitrateMbps, SlotCount, keyframeIntervalSec, preset,
+                  lowLatencyActive ? "on" : "off");
     return true;
 }
 
@@ -1229,8 +1290,9 @@ bool VideoEncoder::CreateVideoRangeConversion(uint32_t width, uint32_t height)
     }
     videoToolbox_.videoRangeTransfer = transfer;
     videoToolbox_.videoRangePool = pool;
-    spdlog::info("VideoEncoder: software {} session is fed a BT.709 video-range 4:2:0 conversion "
-                 "of each frame, keeping the stream limited-range",
+    spdlog::info("VideoEncoder: {} {} session is fed a BT.709 video-range 4:2:0 conversion "
+                 "of each frame, keeping the stream limited-range (about 1 ms of submit per frame)",
+                 inProcessSessionHardware_ ? "low-latency hardware" : "software",
                  VideoCodecName(codec_));
     return true;
 }

@@ -228,6 +228,9 @@ private:
     bool tenBit_ = false;
     bool forceSoftwareForTesting_ = false;
     bool inProcessSessionHardware_ = false;
+    // True only for a session that writes video range from the BGRA surface unaided
+    // (the classic ave hardware encoder); otherwise frames are converted first.
+    bool inProcessSessionKeepsVideoRange_ = false;
 
     // Which process encodes, and why — decided once in Initialize() from an
     // actual VideoToolbox hardware-encoder query plus the encoder_helper

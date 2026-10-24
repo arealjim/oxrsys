@@ -24,6 +24,20 @@ struct ConfigValues
     std::string videoCodec = "h265"; // "h265", "h264", "auto"
     std::string encoderPreset = "balanced"; // "quality", "balanced", "speed"
     bool encoder10Bit = false;      // Encode HEVC Main10 for capable H.265 clients
+    // VideoToolbox low-latency rate control for the in-process hardware session
+    // (kVTVideoEncoderSpecification_EnableLowLatencyRateControl): no look-ahead. The
+    // session itself schedules no periodic IDR in this mode; the periodic keyframe comes
+    // from StreamingServer::EncodeThread, which forces one every keyframe_interval_sec
+    // whatever the session kind, on top of the client's RequestKeyframe. Measured on an
+    // M5 Pro, 2272x1264 HEVC @72: encode callback 12.6 -> 8.1 ms. Off by default: the
+    // low-latency session also floors QP at 16 (see encoder_min_qp).
+    bool encoderLowLatency = false;
+    // encoder_min_qp: kVTCompressionPropertyKey_MinAllowedFrameQP on the in-process session,
+    // 0 = leave VideoToolbox's own floor. The low-latency (rtvc) session floors QP at 16 and
+    // then stops spending bits whatever the bitrate; 12 lets it reach the target on detailed
+    // scenes. Measured on an M5 Pro, 2560x1120 HEVC, a smooth synthetic scene at 50 Mbps:
+    // 38.2 -> 49.8 Mbps actual, callback p50 9.6 -> 10.1 ms.
+    uint32_t encoderMinQp = 0;
 
     // Out-of-process native-arm64 hardware encoder helper. When the runtime
     // dylib is loaded by an x86_64/Rosetta host it cannot reach VideoToolbox's

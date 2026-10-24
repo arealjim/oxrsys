@@ -67,6 +67,11 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green lo
 - Metal swapchains accept `XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT` and create those textures with
   `MTLTextureUsagePixelFormatView`; Godot's Metal driver renders through an sRGB/UNORM view of
   the swapchain texture.
+- The in-process hardware VideoToolbox session can run with low-latency rate control
+  (`encoder_low_latency`, default false): no look-ahead. The session schedules no periodic IDR
+  in this mode; `StreamingServer::EncodeThread` still forces one every `keyframe_interval_sec`,
+  on top of client keyframe requests. The relaxed retry drops it together with the hardware
+  requirement. Its QP floor is 16 unless `encoder_min_qp` lowers it.
 - Vulkan streaming snapshots released color images with application-dispatched Vulkan functions
   into bounded exportable images. Queue submission is non-blocking; fence waits belong to the
   encoder worker. Missing export support, exhausted slots, or wait failures drop the streaming frame

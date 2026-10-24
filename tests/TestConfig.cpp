@@ -23,6 +23,7 @@ keyframe_interval_sec = 4
 video_codec = "h264"
 encoder_preset = "quality"
 encoder_10bit = true
+encoder_low_latency = true
 encoder_helper = true
 encoder_helper_path = "/opt/oxrsys/oxrsys-encoder-helper"
 foveated_encoding_preset = "medium"
@@ -58,6 +59,7 @@ quest_logcat = yes
     CHECK(values.videoCodec == "h264");
     CHECK(values.encoderPreset == "quality");
     CHECK(values.encoder10Bit == true);
+    CHECK(values.encoderLowLatency == true);
     CHECK(values.encoderHelperMode == "true");
     CHECK(values.encoderHelperPath == "/opt/oxrsys/oxrsys-encoder-helper");
     CHECK(values.foveatedEncodingPreset == "medium");
@@ -162,6 +164,41 @@ stage_height_offset_m = 1.5
     const ConfigValues preserved = ParseConfigToml(invalid, values);
     CHECK(preserved.renderDevice == "avp");
     CHECK(preserved.stageHeightOffsetM == -0.25f);
+}
+
+TEST_CASE("Config parser leaves encoder low-latency rate control off by default", "[config]")
+{
+    CHECK(ConfigValues{}.encoderLowLatency == false);
+    std::istringstream on(R"TOML(
+[streaming]
+encoder_low_latency = true
+)TOML");
+    CHECK(ParseConfigToml(on).encoderLowLatency == true);
+    std::istringstream off(R"TOML(
+[streaming]
+encoder_low_latency = false
+)TOML");
+    CHECK(ParseConfigToml(off).encoderLowLatency == false);
+}
+
+TEST_CASE("Config parser reads encoder_min_qp, 0 by default, clamped to the HEVC range", "[config]")
+{
+    CHECK(ConfigValues{}.encoderMinQp == 0);
+    std::istringstream twelve(R"TOML(
+[streaming]
+encoder_min_qp = 12
+)TOML");
+    CHECK(ParseConfigToml(twelve).encoderMinQp == 12);
+    std::istringstream high(R"TOML(
+[streaming]
+encoder_min_qp = 80
+)TOML");
+    CHECK(ParseConfigToml(high).encoderMinQp == 51);
+    std::istringstream negative(R"TOML(
+[streaming]
+encoder_min_qp = -3
+)TOML");
+    CHECK(ParseConfigToml(negative).encoderMinQp == 0);
 }
 
 TEST_CASE("Config parser keeps encoder_helper tri-state with an automatic default", "[config]")

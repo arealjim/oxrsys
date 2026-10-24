@@ -6,6 +6,10 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Added
 
+- Added config `encoder_min_qp` (default 0 = VideoToolbox's own floor): the minimum frame QP of the
+  in-process encoder session. The low-latency session floors QP at 16 and stops spending bits
+  there whatever the bitrate; 12 lets it reach the target (2560x1120 HEVC at 50 Mbps: 38.2 -> 49.8
+  Mbps actual, encode callback p50 within 0.5 ms).
 - Added first-class macOS `arm64` and `x86_64` CI lanes plus universal release packaging with
   architecture validation for the runtime and OXRSys Home.
 - Added a macOS/iOS simulator build lane covering the Cardboard-style stereo viewer and ARKit
@@ -46,6 +50,23 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Changed
 
+- Low-latency sessions are no longer mislabelled as software. With low-latency rate
+  control VideoToolbox serves the session from its real-time hardware encoder
+  (`…videoencoder.hevc.rtvc`), whose session returns `kVTPropertyNotSupportedErr` for
+  `UsingHardwareAcceleratedVideoEncoder`; the runtime read that failure as "software",
+  warned about it. The per-frame BT.709 4:2:0 conversion stays for it: the rtvc
+  encoder, like the software ones, writes a FULL-range stream for a BGRA source (the
+  encoder test's VUI check catches it). The session kind is now decided by the property when it answers and by
+  the encoder id otherwise, the conversion by whether the session keeps video range from
+  BGRA (`EncoderSessionKind.h`, unit-tested), and the init log names the encoder id and
+  says why a hardware session is being converted.
+- The in-process hardware VideoToolbox session can enable low-latency rate control
+  (`kVTVideoEncoderSpecification_EnableLowLatencyRateControl`), new config key
+  `encoder_low_latency` (default false). Measured on an M5 Pro at 2272x1264 H.265 72 Hz: the
+  encode callback fell from 12.6 ms to 8.1 ms, and that 8 ms is flat against bitrate (25/50),
+  resolution scale (0.5/0.75), codec (H.264/H.265), preset and refresh rate (72/90). The session
+  schedules no periodic IDR in this mode; the encode thread's `keyframe_interval_sec` keyframe
+  and client requests still apply. If the low-latency create fails, the relaxed retry drops it.
 - The in-process VideoToolbox session now requires the hardware encoder when VideoToolbox reports
   one for the negotiated codec, retrying without the requirement only if that create fails, and the
   runtime log states whether the session it got is hardware or software.

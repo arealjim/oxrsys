@@ -399,6 +399,14 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
             {
                 values.encoder10Bit = ParseBool(value);
             }
+            else if (key == "encoder_low_latency")
+            {
+                values.encoderLowLatency = ParseBool(value);
+            }
+            else if (key == "encoder_min_qp")
+            {
+                values.encoderMinQp = static_cast<uint32_t>(std::max(0, std::min(51, std::stoi(value))));
+            }
             else if (key == "encoder_helper")
             {
                 // Tri-state: "auto" (decide from the measured hardware-encoder
@@ -626,7 +634,7 @@ bool Config::ReloadIfChangedLocked(bool force)
     if (!force)
     {
         spdlog::info(
-            "OXRSys: Reloaded config from {} (runtime_enabled={} bitrate={}Mbps fov={} refresh={}Hz res_scale={:.2f} render_device={} dyn_min={:.2f} keyframe={}s codec={} preset={} transport={} ffe={} client_ffr={} upscaling={} sharpen={:.2f} reprojection={} abr={} passthrough={} app_alpha_blend={} occlusion={} spatial={}/{}/{}/{} audio={} quest_logcat={})",
+            "OXRSys: Reloaded config from {} (runtime_enabled={} bitrate={}Mbps fov={} refresh={}Hz res_scale={:.2f} render_device={} dyn_min={:.2f} keyframe={}s codec={} preset={} low_latency={} transport={} ffe={} client_ffr={} upscaling={} sharpen={:.2f} reprojection={} abr={} passthrough={} app_alpha_blend={} occlusion={} spatial={}/{}/{}/{} audio={} quest_logcat={})",
             configFilePath,
             newValues.runtimeEnabled,
             newValues.bitrateMbps,
@@ -638,6 +646,7 @@ bool Config::ReloadIfChangedLocked(bool force)
             newValues.keyframeIntervalSec,
             newValues.videoCodec,
             newValues.encoderPreset,
+            newValues.encoderLowLatency,
             newValues.streamingTransport,
             newValues.foveatedEncodingPreset,
             newValues.clientFoveationPreset,
@@ -751,11 +760,11 @@ void Config::SetupLogging()
     spdlog::info("OXRSys Runtime starting (config from {})", configFilePath);
     spdlog::info("  runtime_enabled={} file_logging={} quest_logcat={}",
                   values_.runtimeEnabled, values_.fileLogging, values_.questLogcat);
-    spdlog::info("  bitrate={}Mbps fov={}° refresh={}Hz res_scale={:.2f} dyn_min={:.2f} keyframe={}s preset={} transport={} ffe={} client_ffr={} upscaling={} sharpen={:.2f} reprojection={} abr={} passthrough={} app_alpha_blend={} occlusion={} spatial={}/{}/{}/{} audio={}",
+    spdlog::info("  bitrate={}Mbps fov={}° refresh={}Hz res_scale={:.2f} dyn_min={:.2f} keyframe={}s preset={} low_latency={} transport={} ffe={} client_ffr={} upscaling={} sharpen={:.2f} reprojection={} abr={} passthrough={} app_alpha_blend={} occlusion={} spatial={}/{}/{}/{} audio={}",
                   values_.bitrateMbps, values_.fovDegrees, values_.refreshRateHz,
                   values_.resolutionScale, values_.dynamicResolutionMinScale,
                   values_.keyframeIntervalSec,
-                  values_.encoderPreset, values_.streamingTransport,
+                  values_.encoderPreset, values_.encoderLowLatency, values_.streamingTransport,
                   values_.foveatedEncodingPreset, values_.clientFoveationPreset,
                   values_.clientUpscaling, values_.clientSharpening, values_.clientReprojectionMode,
                   values_.abrMode, values_.passthroughEnabled,

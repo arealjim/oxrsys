@@ -48,6 +48,19 @@ video_codec = "h265"
 # quality  = best visual quality, slightly higher latency
 encoder_preset = "balanced"
 
+# VideoToolbox low-latency rate control for the hardware encoder: no look-ahead. The periodic
+# keyframe still comes every keyframe_interval_sec (the encode thread forces it, whatever the
+# session kind) on top of the client's requests on loss. Cut the encode callback from ~12.6 ms
+# to ~8.1 ms at 2272x1264 H.265 on an M5 Pro. Its QP floor is 16: pair it with encoder_min_qp
+# if the stream should reach its bitrate.
+encoder_low_latency = false
+
+# Lowest QP the in-process encoder may use (MinAllowedFrameQP); 0 keeps VideoToolbox's floor.
+# The low-latency session floors at QP 16 and then leaves bitrate unspent on simple scenes;
+# 12 lets it spend up to the target (2560x1120 at 50 Mbps: 38 -> 50 Mbps actual, +0.5 ms
+# callback; M5 Pro). More bits per frame: check the link can carry them.
+encoder_min_qp = 0
+
 # Encode HEVC Main10 for H.265 clients that advertise 10-bit decode support.
 # H.264 and clients without the capability continue to receive 8-bit video.
 encoder_10bit = false
