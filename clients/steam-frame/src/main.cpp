@@ -1152,6 +1152,15 @@ static void RenderFrame(App& app)
 
                     projViews[eye].pose = layerPose[eye];
                     projViews[eye].fov = views[eye].fov;
+                    if (eye == 1 && g_streamMode) {
+                        // TrackingPacket carries the left eye's FOV only and the server renders the
+                        // right eye with its mirror; the Frame's eyes are not mirror images, so stamp
+                        // the FOV that was rendered, not the real one.
+                        projViews[1].fov.angleLeft = -views[0].fov.angleRight;
+                        projViews[1].fov.angleRight = -views[0].fov.angleLeft;
+                        projViews[1].fov.angleUp = views[0].fov.angleUp;
+                        projViews[1].fov.angleDown = views[0].fov.angleDown;
+                    }
                     projViews[eye].subImage.swapchain = sc.handle;
                     projViews[eye].subImage.imageRect.offset = {0, 0};
                     projViews[eye].subImage.imageRect.extent = {(int32_t)sc.width, (int32_t)sc.height};
