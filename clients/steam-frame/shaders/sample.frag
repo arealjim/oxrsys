@@ -13,6 +13,7 @@ layout(push_constant) uniform Push {
     vec2 edgeRatio;
     vec2 eyeSizeRatio;   // optimized/aligned padding compensation
     int  foveated;       // 0 = plain SBS sampling
+    int  alphaKey;       // 1 = passthrough frame: alpha from a black key, as android-vr does
 } pc;
 
 // Axis-aligned foveated-encoding forward map (matches oxrsys / ALVR AADT).
@@ -58,5 +59,8 @@ void main() {
     }
     corrected = clamp(corrected, vec2(0.0), vec2(1.0));
     vec2 sourceUv = mix(pc.sourceMin, pc.sourceMax, corrected);
-    outColor = vec4(texture(uVideo, sourceUv).rgb, 1.0);
+    vec3 c = texture(uVideo, sourceUv).rgb;
+    float a = 1.0;
+    if (pc.alphaKey != 0) a = smoothstep(0.02, 0.10, max(c.r, max(c.g, c.b)));   // black = the app's transparent clear
+    outColor = vec4(c, a);
 }

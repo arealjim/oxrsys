@@ -6,7 +6,9 @@
 // Also owns the upstream TrackingSender (used from V3 on).
 
 #pragma once
+#include <array>
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 class VideoDecoder;
@@ -41,6 +43,10 @@ public:
     // per-frame centre is only ever applied through this path. False when no match is held
     // (startup, metadata loss) - the caller keeps the previous frame's state.
     bool RenderPoseForFrame(int64_t presentationTimeUs, float outPos[3], float outOri[4]);
+    // True if the frame with this presentation timestamp was flagged VIDEO_FLAG_ALPHA_BLEND
+    // (the app asked for passthrough). Per frame, not the latest received: decode runs a few
+    // frames deep, and the latest flag would key one opaque frame black on a toggle.
+    bool AlphaBlendForFrame(int64_t presentationTimeUs);
 
     // Report client-side latencies over the control channel (V6). oxrsys's
     // adaptive bitrate controller consumes these to tune the encode.
@@ -81,4 +87,11 @@ private:
     uint16_t trackingPort_ = 0;
     bool connected_ = false;
     Foveation foveation_;
+    // pts -> VIDEO_FLAG_ALPHA_BLEND for recent frames, written on the receive thread.
+    struct AlphaEntry { int64_t ptsUs = -1; bool alpha = false; };
+    std::mutex alphaMu_;
+    std::array<AlphaEntry, 64> alphaRing_{};
+    size_t alphaNext_ = 0;
+    bool alphaLatest_ = false;
+    void NoteAlphaBlend(int64_t ptsUs, bool alpha);
 };

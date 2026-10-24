@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 
@@ -88,8 +89,9 @@ bool StreamConnection::Connect(VideoDecoder* decoder, int timeoutMs)
     net_->SetFecInterleaved(
         (srv.serverFeatures & protocol::SERVER_FEATURE_FEC_INTERLEAVED) != 0);
     bool ok = net_->StartReceiving(ip, srv.videoPort,
-        [decoder](const uint8_t* data, size_t size, int64_t timestampNs, int64_t, uint8_t,
-                  uint8_t) {
+        [this, decoder](const uint8_t* data, size_t size, int64_t timestampNs, int64_t, uint8_t flags,
+                        uint8_t) {
+            NoteAlphaBlend(timestampNs / 1000, (flags & protocol::VIDEO_FLAG_ALPHA_BLEND) != 0);
             // Microseconds to match RenderPose.presentationTimeUs, so the decoded frame can
             // be paired with its own render pose and foveation centre.
             decoder->SubmitNal(data, size, timestampNs / 1000);
@@ -124,6 +126,11 @@ bool StreamConnection::Connect(VideoDecoder* decoder, int timeoutMs)
     cc.clientCapabilities = protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING |
                             protocol::CLIENT_CAPABILITY_FOVEATION_CENTER |
                             protocol::CLIENT_CAPABILITY_FEC_INTERLEAVED;
+    // Passthrough: the server then flags alpha-blend frames VIDEO_FLAG_ALPHA_BLEND and composes
+    // the app over black. FRAME_CLIENT_PASSTHROUGH=0 withholds the capability.
+    const char* pt = getenv("FRAME_CLIENT_PASSTHROUGH");
+    if (!(pt && atoi(pt) == 0))
+        cc.clientCapabilities |= protocol::CLIENT_CAPABILITY_MIXED_REALITY_PASSTHROUGH;
     strncpy(cc.deviceName, "FrameClient", sizeof(cc.deviceName) - 1);
     if (send(controlSocket_, &cc, sizeof(cc), 0) < 0) { LOG_ERR("ClientConnect send failed"); return false; }
 
@@ -146,6 +153,25 @@ bool StreamConnection::LatestRenderPose(float outPos[3], float outOri[4])
     memcpy(outPos, rp.position, sizeof(float) * 3);
     memcpy(outOri, rp.orientation, sizeof(float) * 4);
     return true;
+}
+
+void StreamConnection::NoteAlphaBlend(int64_t ptsUs, bool alpha)
+{
+    std::lock_guard<std::mutex> lk(alphaMu_);
+    alphaLatest_ = alpha;
+    // One entry per frame: an access unit arrives as several NALs with the same pts.
+    const size_t prev = (alphaNext_ + alphaRing_.size() - 1) % alphaRing_.size();
+    if (alphaRing_[prev].ptsUs == ptsUs) { alphaRing_[prev].alpha = alpha; return; }
+    alphaRing_[alphaNext_] = {ptsUs, alpha};
+    alphaNext_ = (alphaNext_ + 1) % alphaRing_.size();
+}
+
+bool StreamConnection::AlphaBlendForFrame(int64_t presentationTimeUs)
+{
+    std::lock_guard<std::mutex> lk(alphaMu_);
+    for (const AlphaEntry& e : alphaRing_)
+        if (e.ptsUs == presentationTimeUs) return e.alpha;
+    return alphaLatest_;   // not held (pts not stamped, or long evicted): best guess
 }
 
 bool StreamConnection::RenderPoseForFrame(int64_t presentationTimeUs, float outPos[3],

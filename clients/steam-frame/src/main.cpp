@@ -129,7 +129,11 @@ struct PushConstants {
     float edgeRatio[2];
     float eyeSizeRatio[2];
     int32_t foveated;
+    int32_t alphaKey;    // 1 = passthrough frame: alpha from a black key (smoothstep 0.02..0.10 of max(rgb))
 };
+
+static bool g_alphaBlendSupported = false;   // the runtime enumerates XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND
+static bool g_displayedAlpha = false;        // the frame on screen was flagged VIDEO_FLAG_ALPHA_BLEND
 
 static VideoDecoder g_decoder;
 static std::vector<uint8_t> g_frameBuf;
@@ -219,6 +223,18 @@ static bool GetSystem(App& app)
     XrSystemGetInfo gi = {XR_TYPE_SYSTEM_GET_INFO};
     gi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
     XR_CHECK(xrGetSystem(app.instance, &gi, &app.systemId));
+    {
+        uint32_t n = 0;
+        xrEnumerateEnvironmentBlendModes(app.instance, app.systemId,
+                                         XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &n, nullptr);
+        std::vector<XrEnvironmentBlendMode> modes(n);
+        if (n) xrEnumerateEnvironmentBlendModes(app.instance, app.systemId,
+                                                XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, n, &n, modes.data());
+        for (uint32_t i = 0; i < n; i++)
+            if (modes[i] == XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND) g_alphaBlendSupported = true;
+        LOG_INFO("environment blend modes: %u, alpha blend %s", n,
+                 g_alphaBlendSupported ? "supported" : "NOT supported");
+    }
 
     uint32_t count = 0;
     XR_CHECK(xrEnumerateViewConfigurationViews(app.instance, app.systemId,
@@ -874,6 +890,7 @@ static bool RenderEye(App& app, uint32_t eye, uint32_t imageIndex)
         pc.sourceMax[0] = (eye == 0) ? 0.5f : 1.0f; pc.sourceMax[1] = 1.0f;
         const StreamConnection::Foveation& fv = g_stream.FoveationParams();
         pc.foveated = (g_streamMode && fv.enabled) ? 1 : 0;
+        pc.alphaKey = (g_streamMode && g_alphaBlendSupported && g_displayedAlpha) ? 1 : 0;
         pc.centerSize[0] = fv.centerSize[0]; pc.centerSize[1] = fv.centerSize[1];
         pc.centerShift[0] = fv.centerShift[0]; pc.centerShift[1] = fv.centerShift[1];
         pc.edgeRatio[0] = fv.edgeRatio[0]; pc.edgeRatio[1] = fv.edgeRatio[1];
@@ -964,6 +981,7 @@ static void RenderFrame(App& app)
         {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW});
     XrCompositionLayerProjection layer = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     bool submitLayer = false;
+    bool alphaFrame = false;   // this frame's layer blends over passthrough
 
     if (fs.shouldRender) {
         XrView views[VIEW_COUNT] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
@@ -1057,6 +1075,7 @@ static void RenderFrame(App& app)
             static bool displayedPoseValid = false;
             if (haveNew && fw > 0 && fh > 0) {
                 UploadVideoFrame(app, g_frameBuf.data(), (uint32_t)fw, (uint32_t)fh);
+                if (g_streamMode) g_displayedAlpha = g_stream.AlphaBlendForFrame(framePtsUs);
                 if (g_streamMode &&
                     g_stream.RenderPoseForFrame(framePtsUs, displayedPos, displayedOri)) {
                     displayedPoseValid = true;
@@ -1127,6 +1146,19 @@ static void RenderFrame(App& app)
                     projViews[eye].subImage.imageRect.extent = {(int32_t)sc.width, (int32_t)sc.height};
                     projViews[eye].subImage.imageArrayIndex = 0;
                 }
+                // Passthrough: a frame flagged alpha-blend goes out with source alpha over the
+                // headset's passthrough (the shader keyed black to transparent); opaque frames
+                // are unchanged.
+                alphaFrame = g_streamMode && g_alphaBlendSupported && g_displayedAlpha;
+                {
+                    static bool alphaLogged = false;
+                    if (alphaFrame && !alphaLogged) {
+                        alphaLogged = true;
+                        LOG_INFO("passthrough: first alpha-blend frame; layer blends source alpha, environment ALPHA_BLEND");
+                    }
+                }
+                layer.layerFlags = alphaFrame ? (XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
+                                                 XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT) : 0;
                 layer.space = app.stageSpace;
                 layer.viewCount = VIEW_COUNT;
                 layer.views = projViews.data();
@@ -1148,7 +1180,8 @@ static void RenderFrame(App& app)
     const XrCompositionLayerBaseHeader* layers[] = {(XrCompositionLayerBaseHeader*)&layer};
     XrFrameEndInfo ei = {XR_TYPE_FRAME_END_INFO};
     ei.displayTime = fs.predictedDisplayTime;
-    ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    ei.environmentBlendMode = alphaFrame ? XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND
+                                         : XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     ei.layerCount = submitLayer ? 1 : 0;
     ei.layers = submitLayer ? layers : nullptr;
     xrEndFrame(app.session, &ei);
