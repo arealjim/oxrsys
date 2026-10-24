@@ -70,7 +70,7 @@ the Frame's runtime by only swapping loader discovery.
 - **VIEW-space head pose** sent upstream (was the left-eye pose — a half-IPD skew).
 - **Honest refresh-rate log** (set vs. not-supported), matching the runtime now returning
   `FUNCTION_UNSUPPORTED` when it can't change rate.
-- **Swapchain-image readback** (`FRAME_CLIENT_DUMP` → `/tmp/frame_client_eye0.rgba`): reads the
+- **Swapchain-image readback** (`FRAME_CLIENT_DUMP` → `$XDG_RUNTIME_DIR/frame_client_eye0.rgba` (fallback `/tmp`, a fresh 0600 file)): reads the
   rendered eye back for a gold-standard visual, working around DisplayXR's atlas hook missing our
   two-swapchain layout. Confirmed the full screen→eye pipeline visually.
 - **Keyframe recovery**: on a decode error (lost reference frame) the client sends a
@@ -123,7 +123,7 @@ env XR_RUNTIME_JSON="$DXR/openxr_displayxr.json" DYLD_LIBRARY_PATH="$DXR/lib" \
     ./build/frame_client ./assets/stereo_test.hevc
 ```
 Video path: arg 1, else `$FRAME_CLIENT_VIDEO`, else `assets/stereo_test.hevc`.
-`FRAME_CLIENT_DUMP=1` writes the first decoded frame to `/tmp/frame_client_decoded.rgba`.
+`FRAME_CLIENT_DUMP=1` writes the first decoded frame to `$XDG_RUNTIME_DIR/frame_client_decoded.rgba` (fallback `/tmp`).
 
 ## Build (Mac dev, against DisplayXR)
 

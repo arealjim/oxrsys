@@ -35,6 +35,7 @@
 #include <vector>
 #include <thread>
 #include <unistd.h>
+#include <fcntl.h>
 
 #define LOG_INFO(fmt, ...) fprintf(stderr, "[INFO] " fmt "\n", ##__VA_ARGS__)
 #define LOG_WARN(fmt, ...) fprintf(stderr, "[WARN] " fmt "\n", ##__VA_ARGS__)
@@ -62,6 +63,20 @@
 // State
 // ============================================================================
 
+
+// Diagnostic dumps go to a fresh 0600 file in $XDG_RUNTIME_DIR (fallback /tmp): a fixed name in a
+// shared /tmp could be pre-planted as a symlink by another user. Unlink, then O_EXCL | O_NOFOLLOW.
+static FILE* OpenDumpFile(const char* name, std::string& pathOut)
+{
+    const char* dir = getenv("XDG_RUNTIME_DIR");
+    pathOut = std::string(dir && *dir ? dir : "/tmp") + "/" + name;
+    unlink(pathOut.c_str());
+    int fd = open(pathOut.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) return nullptr;
+    FILE* f = fdopen(fd, "wb");
+    if (!f) close(fd);
+    return f;
+}
 static constexpr uint32_t VIEW_COUNT = 2; // PRIMARY_STEREO
 
 struct Swapchain {
@@ -824,9 +839,10 @@ static void DumpSwapchainImage(App& app, Swapchain& sc, uint32_t imageIndex)
     vkWaitForFences(app.device, 1, &app.fence, VK_TRUE, UINT64_MAX);
 
     if (vkMapMemory(app.device, mem, 0, sz, 0, &mapped) == VK_SUCCESS) {
-        FILE* f = fopen("/tmp/frame_client_eye0.rgba", "wb");
+        std::string path;
+        FILE* f = OpenDumpFile("frame_client_eye0.rgba", path);
         if (f) { fwrite(mapped, 1, (size_t)sz, f); fclose(f);
-            LOG_INFO("dumped rendered eye0 %ux%u to /tmp/frame_client_eye0.rgba", sc.width, sc.height); }
+            LOG_INFO("dumped rendered eye0 %ux%u to %s", sc.width, sc.height, path.c_str()); }
         vkUnmapMemory(app.device, mem);
     }
     vkDestroyBuffer(app.device, buf, nullptr);
@@ -1063,9 +1079,10 @@ static void RenderFrame(App& app)
                 }
                 static bool dumped = false;
                 if (!dumped && getenv("FRAME_CLIENT_DUMP")) {
-                    FILE* f = fopen("/tmp/frame_client_decoded.rgba", "wb");
+                    std::string path;
+                    FILE* f = OpenDumpFile("frame_client_decoded.rgba", path);
                     if (f) { fwrite(g_frameBuf.data(), 1, g_frameBuf.size(), f); fclose(f);
-                        LOG_INFO("dumped decoded frame %dx%d to /tmp/frame_client_decoded.rgba", fw, fh); }
+                        LOG_INFO("dumped decoded frame %dx%d to %s", fw, fh, path.c_str()); }
                     dumped = true;
                 }
             }
