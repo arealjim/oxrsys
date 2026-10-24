@@ -81,6 +81,14 @@ bool StreamConnection::Connect(VideoDecoder* decoder, int timeoutMs)
             srv.serverName, ip, srv.videoPort, srv.trackingPort,
             encodedW_, encodedH_, srv.refreshRateHz);
 
+    // Hardware decoders need the encoded size before the first NAL; the receive thread
+    // (which feeds the decoder) has not started yet.
+    if (encodedW_ > 0 && encodedH_ > 0 &&
+        !decoder->ReconfigureStream((int)encodedW_, (int)encodedH_)) {
+        LOG_ERR("decoder open for %ux%u failed", encodedW_, encodedH_);
+        return false;
+    }
+
     // Start receiving BEFORE ClientConnect — the server encodes immediately on
     // connect, and the first keyframe must not arrive before we're listening.
     // Match the server's negotiated FEC group layout; recovering with a different layout

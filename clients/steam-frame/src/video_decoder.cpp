@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 
@@ -96,16 +97,29 @@ bool VideoDecoder::NextFrameRGBA(std::vector<uint8_t>& out, int& width, int& hei
 
 bool VideoDecoder::openCodecOnly(int avCodecId)
 {
-    const AVCodec* dec = avcodec_find_decoder((AVCodecID)avCodecId);
+    // The Steam Frame's video decoder is a V4L2 memory-to-memory device, which the system FFmpeg
+    // exposes as hevc_v4l2m2m (about 1 ms per frame there; software hevc 7.8 ms on one thread).
+    const AVCodec* dec = nullptr;
+    if (const char* name = getenv("FRAME_CLIENT_DECODER")) {
+        dec = avcodec_find_decoder_by_name(name);
+        if (!dec) LOG_ERR("decoder '%s' not found; falling back to the default", name);
+    }
+    if (!dec) dec = avcodec_find_decoder((AVCodecID)avCodecId);
     if (!dec) { LOG_ERR("no decoder for codec id %d", avCodecId); return false; }
     codec_ = avcodec_alloc_context3(dec);
     if (!codec_) { LOG_ERR("ctx alloc"); return false; }
+    if (expectedW_ > 0 && expectedH_ > 0) {
+        // v4l2m2m allocates its queues at open (VIDIOC_REQBUFS fails at 0x0).
+        codec_->width = codec_->coded_width = expectedW_;
+        codec_->height = codec_->coded_height = expectedH_;
+    }
     codec_->flags |= AV_CODEC_FLAG_LOW_DELAY;
     // Packet pts are microseconds. hevc_v4l2m2m converts them through the context's time base and
     // returns every frame with AV_NOPTS_VALUE when it is unset (3,600 of 3,600 on the Frame).
     codec_->time_base = AVRational{1, 1000000};
     codec_->pkt_timebase = AVRational{1, 1000000};
     if (avcodec_open2(codec_, dec, nullptr) < 0) { LOG_ERR("avcodec_open2 (stream)"); return false; }
+    LOG_INF("decoder %s (%dx%d at open)", dec->name, expectedW_, expectedH_);
     parser_ = av_parser_init(avCodecId);
     if (!parser_) { LOG_ERR("parser init"); return false; }
     frame_ = av_frame_alloc();
@@ -119,8 +133,28 @@ bool VideoDecoder::OpenStream(Codec codec)
     int id = (codec == Codec::H264) ? AV_CODEC_ID_H264 : AV_CODEC_ID_HEVC;
     streamCodecId_ = id;
     au_.clear();
-    if (!openCodecOnly(id)) { closeInternal(); return false; }
+    if (!openCodecOnly(id)) {
+        closeInternal();
+        if (getenv("FRAME_CLIENT_DECODER")) {
+            // SubmitNal is a no-op until ReconfigureStream opens it at the announced size.
+            LOG_INF("stream decoder open deferred until the encoded size is known");
+            return true;
+        }
+        return false;
+    }
     LOG_INF("stream decoder open (%s)", avcodec_get_name((AVCodecID)id));
+    return true;
+}
+
+bool VideoDecoder::ReconfigureStream(int width, int height)
+{
+    if (!streamMode_ || width <= 0 || height <= 0) return false;
+    if (codec_ && width == expectedW_ && height == expectedH_) return true;
+    expectedW_ = width;
+    expectedH_ = height;
+    closeInternal();
+    if (!openCodecOnly(streamCodecId_)) { closeInternal(); return false; }
+    LOG_INF("stream decoder reopened for %dx%d", width, height);
     return true;
 }
 

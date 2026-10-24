@@ -29,7 +29,13 @@ public:
     bool NextFrameRGBA(std::vector<uint8_t>& out, int& width, int& height);
 
     // ---- Stream mode ----
+    // FRAME_CLIENT_DECODER names a libavcodec decoder to use instead of the default for the
+    // codec (hevc_v4l2m2m on the Steam Frame). Hardware wrappers size their buffers at open
+    // and refuse a 0x0 context; for them the open is deferred to ReconfigureStream.
     bool OpenStream(Codec codec);
+    // Called once the server's announce gives the encoded size, before the first NAL: reopens
+    // the decoder with that size preset (a no-op if it is already open at that size).
+    bool ReconfigureStream(int width, int height);
     // Called from the network thread with a complete encoded access unit. ptsUs is the
     // frame's presentation timestamp; it rides through parser and codec delays so the
     // decoded output can be matched to its per-frame metadata (render pose, foveation
@@ -83,6 +89,7 @@ private:
     int latestW_ = 0, latestH_ = 0;
     int64_t latestPtsUs_ = 0;
     int streamCodecId_ = 0;
+    int expectedW_ = 0, expectedH_ = 0;
     std::vector<uint8_t> au_;      // HEVC access unit being assembled (stream mode)
     uint64_t noPtsFrames_ = 0;
     bool latestFresh_ = false;
