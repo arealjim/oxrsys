@@ -6,6 +6,15 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Added
 
+- Added config send_pacing_ms (default 0 = burst, as before) and send_pacing_keyframe_ms (0 = twice
+  send_pacing_ms): the UDP datagrams of each encoded frame (data and FEC parity) are spread evenly
+  over that window instead of reaching the socket as one burst, which an access point queue under
+  contention drops from the tail. Capped at 0.8 of the frame period, and the rest of a frame goes
+  at once when a newer frame is waiting; waits spin below 1 ms, so the pacing adds no latency
+  beyond the window. The encode-queue log line gains pacing, pacedFlush, udpSendFail (sendto
+  failures, which were previously silent) and pacingLateMax. New tool oxrsys_pacing_probe measures
+  a synthetic 90 fps stream on 127.0.0.1 (loopback, 50 Mbps, 4/8 ms windows: peak 1 ms rate p99
+  684 -> 342 Mbps, about 27% of one core for the spin).
 - Added first-class macOS `arm64` and `x86_64` CI lanes plus universal release packaging with
   architecture validation for the runtime and OXRSys Home.
 - Added a macOS/iOS simulator build lane covering the Cardboard-style stereo viewer and ARKit

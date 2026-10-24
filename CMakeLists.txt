@@ -178,6 +178,7 @@ add_executable(oxrsys_runtime_tests
     tests/TestRuntimePlatform.cpp
     tests/TestStreamingAbr.cpp
     tests/TestStreamingFrameQueue.cpp
+    tests/TestPacketPacer.cpp
     tests/TestStreamingReconfigure.cpp
     tests/TestSnapshotLeasePool.cpp
     tests/TestSwapchainCreateValidation.cpp
@@ -196,6 +197,7 @@ add_executable(oxrsys_runtime_tests
     runtime/src/RuntimePlatform.cpp
     runtime/src/RuntimeSockets.cpp
     runtime/src/StreamingFrameQueue.cpp
+    runtime/src/PacketPacer.cpp
     runtime/src/VideoCodecSelection.cpp
     runtime/src/EncoderPathPolicy.cpp
     runtime/src/VulkanDispatch.cpp
@@ -352,6 +354,19 @@ set_tests_properties(oxrsys_videotoolbox_encoder_tests PROPERTIES
     TIMEOUT 60
 )
 list(APPEND OXRSYS_RUNTIME_TEST_TARGETS oxrsys_videotoolbox_encoder_tests)
+
+# Packet pacing probe (not a test): a synthetic 90 fps stream packetised like
+# StreamingServer::SendNalUnit, paced by PacketPacer, sent to a receiver on
+# 127.0.0.1 only. Prints burst length, packet spacing, peak 1 ms rate and the
+# latency the pacing adds. See tools/PacingProbe.cpp.
+add_executable(oxrsys_pacing_probe
+    tools/PacingProbe.cpp
+    runtime/src/PacketPacer.cpp
+)
+target_include_directories(oxrsys_pacing_probe PRIVATE
+    runtime/src
+    common/protocol/include
+)
 
 add_dependencies(oxrsys_runtime_sync_compile_commands
     ${OXRSYS_RUNTIME_TEST_TARGETS}

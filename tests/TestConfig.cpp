@@ -255,3 +255,25 @@ TEST_CASE("Config singleton initializes with bounded Quest logcat clear", "[conf
 
     Config::Get().Shutdown();
 }
+
+TEST_CASE("Config parser reads send pacing windows and clamps them", "[config][pacing]")
+{
+    {
+        std::istringstream input("[streaming]\nsend_pacing_ms = 3.5\nsend_pacing_keyframe_ms = 8\n");
+        const ConfigValues values = ParseConfigToml(input);
+        CHECK(values.sendPacingMs == 3.5f);
+        CHECK(values.sendPacingKeyframeMs == 8.0f);
+    }
+    {
+        std::istringstream input("[streaming]\nsend_pacing_ms = 99\nsend_pacing_keyframe_ms = -4\n");
+        const ConfigValues values = ParseConfigToml(input);
+        CHECK(values.sendPacingMs == 10.0f);
+        CHECK(values.sendPacingKeyframeMs == 0.0f);
+    }
+    {
+        std::istringstream input("[streaming]\nbitrate_mbps = 50\n");
+        const ConfigValues values = ParseConfigToml(input);
+        CHECK(values.sendPacingMs == 0.0f); // default: burst, as before
+        CHECK(values.sendPacingKeyframeMs == 0.0f);
+    }
+}
