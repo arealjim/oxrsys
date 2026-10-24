@@ -8,8 +8,11 @@
 #pragma once
 #include <oxrsys/protocol/Protocol.h>
 
+#include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <thread>
 
 class VideoDecoder;
 namespace oxr {
@@ -80,7 +83,16 @@ public:
 
 private:
     uint32_t panelRefreshHz_ = 0;
-    oxr::protocol::ClientConnect lastConnect_{};   // the ClientConnect last sent
+    // The ClientConnect last sent. Written on the frame thread (Connect, SetPanelRefreshHz), read
+    // by the retry thread for its resends: under connectMu_, so a resend carries the current rate.
+    std::mutex connectMu_;
+    oxr::protocol::ClientConnect lastConnect_{};
+    bool SendClientConnect(const oxr::protocol::ClientConnect& cc, int attempt);
+    // ClientConnect resend until the server's first video packet or render pose arrives.
+    std::thread connectRetry_;
+    std::atomic<bool> stopRetry_{false};
+    // FRAME_CLIENT_TEST_DROP_CONNECT=<n>: swallow the first n ClientConnect sends (test hook).
+    std::atomic<int> testDropConnects_{0};
     oxr::NetworkReceiver* net_ = nullptr;
     oxr::TrackingSender* tracker_ = nullptr;
     int controlSocket_ = -1;

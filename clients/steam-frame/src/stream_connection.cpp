@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 
@@ -34,9 +35,28 @@ void StreamConnection::SetPanelRefreshHz(uint32_t hz)
     panelRefreshHz_ = hz;
     if (!connected_ || controlSocket_ < 0) return;
     // The server re-negotiates on a ClientConnect from the connected address (one encoder rebuild).
-    lastConnect_.refreshRateHz = hz;
+    protocol::ClientConnect cc;
+    {
+        std::lock_guard<std::mutex> lk(connectMu_);
+        lastConnect_.refreshRateHz = hz;
+        cc = lastConnect_;
+    }
     LOG_INF("panel refresh changed to %u Hz: re-sending ClientConnect so the server paces to it", hz);
-    if (send(controlSocket_, &lastConnect_, sizeof(lastConnect_), 0) < 0) LOG_ERR("ClientConnect re-send failed");
+    SendClientConnect(cc, 0);
+}
+
+bool StreamConnection::SendClientConnect(const protocol::ClientConnect& cc, int attempt)
+{
+    if (testDropConnects_.load() > 0) {
+        testDropConnects_.fetch_sub(1);
+        LOG_INF("ClientConnect send %d swallowed (FRAME_CLIENT_TEST_DROP_CONNECT)", attempt);
+        return true;
+    }
+    if (send(controlSocket_, &cc, sizeof(cc), 0) < 0) {
+        LOG_ERR("ClientConnect send %d failed", attempt);
+        return false;
+    }
+    return true;
 }
 
 bool StreamConnection::Connect(VideoDecoder* decoder, int timeoutMs)
@@ -138,11 +158,48 @@ bool StreamConnection::Connect(VideoDecoder* decoder, int timeoutMs)
                             protocol::CLIENT_CAPABILITY_FOVEATION_CENTER |
                             protocol::CLIENT_CAPABILITY_FEC_INTERLEAVED;
     strncpy(cc.deviceName, "FrameClient", sizeof(cc.deviceName) - 1);
-    lastConnect_ = cc;
-    if (send(controlSocket_, &cc, sizeof(cc), 0) < 0) { LOG_ERR("ClientConnect send failed"); return false; }
+    if (connectRetry_.joinable()) { stopRetry_ = true; connectRetry_.join(); }
+    if (const char* s = getenv("FRAME_CLIENT_TEST_DROP_CONNECT")) testDropConnects_ = atoi(s);
+    { std::lock_guard<std::mutex> lk(connectMu_); lastConnect_ = cc; }
+    if (!SendClientConnect(cc, 1)) return false;
 
     LOG_INF("connected — ClientConnect sent, receiving video");
     connected_ = true;
+
+    // ClientConnect is a single UDP datagram and the server only starts encoding once it arrives,
+    // so one lost packet meant no session while discovery kept answering. Resend until the first
+    // video packet or render pose is in, up to kConnectSends. The server rebuilds its encoder on
+    // every ClientConnect it receives, so the arrival check runs right before each send; the first
+    // resend waits 500 ms (send -> first decoded frame measures about 220 ms), later ones +250 ms.
+    stopRetry_ = false;
+    connectRetry_ = std::thread([this] {
+        constexpr int kConnectSends = 5;
+        int waitMs = 500;
+        int sends = 1;
+        auto answered = [this] {
+            return net_->GetPacketsReceived() > 0 || net_->GetLatestRenderPose().valid;
+        };
+        while (true) {
+            for (int slept = 0; slept < waitMs && !stopRetry_; slept += 20)
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            if (stopRetry_) return;
+            if (answered()) {
+                LOG_INF("ClientConnect answered after %d send%s (%u video packets in)", sends,
+                        sends == 1 ? "" : "s", net_->GetPacketsReceived());
+                return;
+            }
+            if (sends >= kConnectSends) {
+                LOG_ERR("no video after %d ClientConnect sends; the server is not answering this client", sends);
+                return;
+            }
+            LOG_INF("no video %d ms after ClientConnect send %d; resending (%d/%d)", waitMs,
+                    sends, sends + 1, kConnectSends);
+            protocol::ClientConnect cc;   // the current one: a panel-rate change rides along
+            { std::lock_guard<std::mutex> lk(connectMu_); cc = lastConnect_; }
+            SendClientConnect(cc, ++sends);
+            waitMs += 250;
+        }
+    });
     return true;
 }
 
@@ -230,6 +287,8 @@ void StreamConnection::SendKeyframeRequest(uint32_t reasonFlags, uint32_t detail
 void StreamConnection::Disconnect()
 {
     connected_ = false;
+    stopRetry_ = true;
+    if (connectRetry_.joinable()) connectRetry_.join();
     if (net_) net_->Stop();
     if (tracker_) tracker_->Disconnect();
     if (controlSocket_ >= 0) { close(controlSocket_); controlSocket_ = -1; }
