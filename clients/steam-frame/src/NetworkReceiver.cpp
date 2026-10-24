@@ -214,16 +214,30 @@ void NetworkReceiver::WireAssemblerCallbacks()
                          frame.flags, frame.codec);
         }
     });
+    // A NAL still incomplete when the next one starts is parked for one retransmit wait and
+    // NACKed from here; the server resends from its cache in about 5 ms. NACKing on abandonment,
+    // as before, was too late: the retransmit could no longer land.
+    assembler_.SetRetransmitWaitUs(streaming::VideoFrameAssembler::kRecommendedRetransmitWaitUs);
+    assembler_.SetOnFrameIncomplete(
+        [this](const streaming::VideoFrameAssembler::AbandonedFrame& frame) {
+            SendNack(frame.frameIndex, frame.totalPackets, frame.packetReceived);
+            uint32_t n = nacksSent_.load();
+            if (n <= 5 || n % 100 == 0)
+            {
+                LOGI("Frame %u incomplete (%u/%u packets), NACK sent, parked for retransmit",
+                     frame.frameIndex, frame.receivedPackets, frame.totalPackets);
+            }
+        });
     assembler_.SetOnFrameAbandoned(
         [this](const streaming::VideoFrameAssembler::AbandonedFrame& frame) {
-            // Send NACK for missing packets (server may retransmit from cache)
-            SendNack(frame.frameIndex, frame.totalPackets, frame.packetReceived);
-
             uint32_t dropped = framesDropped_.fetch_add(1) + 1;
             if (dropped <= 5 || dropped % 100 == 0)
             {
-                LOGI("Frame %u dropped (%u/%u packets received)",
-                     frame.frameIndex, frame.receivedPackets, frame.totalPackets);
+                LOGI("Frame %u dropped (%u/%u packets received) after the retransmit wait; "
+                     "parked recoveries=%u discarded NALs=%u late retransmits=%u nacks=%u",
+                     frame.frameIndex, frame.receivedPackets, frame.totalPackets,
+                     assembler_.ParkedRecoveries(), assembler_.DiscardedNals(),
+                     assembler_.LateRetransmits(), nacksSent_.load());
             }
         });
     assembler_.SetOnFecRecovery(
@@ -289,6 +303,9 @@ void NetworkReceiver::ReceiveThread(OnNalUnitCallback callback)
         ssize_t received = recv(videoSocket_, buffer, sizeof(buffer), 0);
         if (received < (ssize_t)sizeof(protocol::VideoPacketHeader))
         {
+            // 1 ms receive timeout: let a parked NAL's retransmit wait expire even when
+            // nothing arrives.
+            assembler_.Poll();
             continue;
         }
 
