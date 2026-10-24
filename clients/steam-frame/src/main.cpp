@@ -995,13 +995,30 @@ static void RenderFrame(App& app)
                 // applies its own IPD to derive the stereo pair, so a half-IPD
                 // offset here would skew what it renders. Fall back to view[0].
                 XrPosef head = views[0].pose;
-                XrSpaceLocation hl = {XR_TYPE_SPACE_LOCATION};
+                // Velocities too (in the stage space, which is what the server's predictor
+                // composes with): sent as zero, the server falls back to a finite difference of
+                // the last two packets and halves its rotation horizon.
+                XrSpaceVelocity hv{};
+                hv.type = XR_TYPE_SPACE_VELOCITY;
+                XrSpaceLocation hl{};
+                hl.type = XR_TYPE_SPACE_LOCATION;
+                hl.next = &hv;
                 if (app.viewSpace &&
                     XR_SUCCEEDED(xrLocateSpace(app.viewSpace, app.stageSpace,
                                                fs.predictedDisplayTime, &hl)) &&
                     (hl.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
                     (hl.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
                     head = hl.pose;
+                    if (hv.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) {
+                        pkt.headLinearVelocity[0] = hv.linearVelocity.x;
+                        pkt.headLinearVelocity[1] = hv.linearVelocity.y;
+                        pkt.headLinearVelocity[2] = hv.linearVelocity.z;
+                    }
+                    if (hv.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) {
+                        pkt.headAngularVelocity[0] = hv.angularVelocity.x;
+                        pkt.headAngularVelocity[1] = hv.angularVelocity.y;
+                        pkt.headAngularVelocity[2] = hv.angularVelocity.z;
+                    }
                 }
                 pkt.headPosition[0] = head.position.x;
                 pkt.headPosition[1] = head.position.y;
