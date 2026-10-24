@@ -34,6 +34,9 @@ public:
     // frame's presentation timestamp; it rides through parser and codec delays so the
     // decoded output can be matched to its per-frame metadata (render pose, foveation
     // centre) rather than to whatever arrived most recently.
+    // HEVC: the receiver delivers one NAL per call (VPS, SPS, PPS, SEI, then the slice, all with the
+    // frame's pts). They are gathered into one access unit, sent to the decoder as one packet with
+    // that pts when the slice arrives, and the decoder is polled briefly for that frame's own output.
     void SubmitNal(const uint8_t* data, size_t size, int64_t ptsUs);
     // Called from the render thread; true if a newer decoded frame was taken.
     bool TakeLatestRGBA(std::vector<uint8_t>& out, int& width, int& height,
@@ -48,11 +51,19 @@ public:
     // caller should ask the server for a keyframe (IDR) to resync the decoder.
     bool TakeNeedKeyframe();
 
+    // Appends one Annex-B NAL (a start code is added if it has none) to an HEVC access unit
+    // being assembled. True when the NAL is a slice, i.e. the access unit is complete.
+    static bool AppendNalToAccessUnit(std::vector<uint8_t>& au, const uint8_t* data, size_t size);
+    // Non-slice NALs accumulate until a slice arrives; a run without one is dropped at this size
+    // (about 3x the largest IDR at 50 Mbit/s).
+    static constexpr size_t kMaxAccessUnitBytes = 2u << 20;
+
 private:
     bool openInternal();     // file
     bool openCodecOnly(int avCodecId);
     void closeInternal();
     void convertToLatest();  // frame_ -> latest_ (RGBA), stream mode
+    void sendAccessUnit(uint8_t* data, int size, int64_t ptsUs);
 
     std::string path_;
     int width_ = 0, height_ = 0;
@@ -71,7 +82,9 @@ private:
     std::vector<uint8_t> latest_;
     int latestW_ = 0, latestH_ = 0;
     int64_t latestPtsUs_ = 0;
-    int64_t lastSubmitPtsUs_ = 0;
+    int streamCodecId_ = 0;
+    std::vector<uint8_t> au_;      // HEVC access unit being assembled (stream mode)
+    uint64_t noPtsFrames_ = 0;
     bool latestFresh_ = false;
     double lastDecodeMs_ = 0.0;
     bool needKeyframe_ = false;

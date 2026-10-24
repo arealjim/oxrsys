@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -99,6 +100,11 @@ bool VideoDecoder::openCodecOnly(int avCodecId)
     if (!dec) { LOG_ERR("no decoder for codec id %d", avCodecId); return false; }
     codec_ = avcodec_alloc_context3(dec);
     if (!codec_) { LOG_ERR("ctx alloc"); return false; }
+    codec_->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    // Packet pts are microseconds. hevc_v4l2m2m converts them through the context's time base and
+    // returns every frame with AV_NOPTS_VALUE when it is unset (3,600 of 3,600 on the Frame).
+    codec_->time_base = AVRational{1, 1000000};
+    codec_->pkt_timebase = AVRational{1, 1000000};
     if (avcodec_open2(codec_, dec, nullptr) < 0) { LOG_ERR("avcodec_open2 (stream)"); return false; }
     parser_ = av_parser_init(avCodecId);
     if (!parser_) { LOG_ERR("parser init"); return false; }
@@ -111,6 +117,8 @@ bool VideoDecoder::OpenStream(Codec codec)
 {
     streamMode_ = true;
     int id = (codec == Codec::H264) ? AV_CODEC_ID_H264 : AV_CODEC_ID_HEVC;
+    streamCodecId_ = id;
+    au_.clear();
     if (!openCodecOnly(id)) { closeInternal(); return false; }
     LOG_INF("stream decoder open (%s)", avcodec_get_name((AVCodecID)id));
     return true;
@@ -124,14 +132,104 @@ void VideoDecoder::convertToLatest()
     latest_.swap(rgba);
     latestW_ = frame_->width;
     latestH_ = frame_->height;
-    latestPtsUs_ = frame_->pts != AV_NOPTS_VALUE ? frame_->pts : lastSubmitPtsUs_;
+    // Never borrow the latest submit's pts for a frame without one: with a decoder that
+    // returns frames late it belongs to a later frame, whose render pose would then be
+    // stamped on these pixels. Unmatched is better than mismatched.
+    latestPtsUs_ = frame_->pts != AV_NOPTS_VALUE ? frame_->pts : frame_->best_effort_timestamp;
+    if (frame_->pts == AV_NOPTS_VALUE && (noPtsFrames_++ % 300) == 0)
+        LOG_ERR("decoded frame without pts (%llu so far): its render pose cannot be matched",
+                (unsigned long long)noPtsFrames_);
     latestFresh_ = true;
+}
+
+bool VideoDecoder::AppendNalToAccessUnit(std::vector<uint8_t>& au, const uint8_t* data, size_t size)
+{
+    size_t sc = 0;
+    if (size >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1) sc = 4;
+    else if (size >= 3 && data[0] == 0 && data[1] == 0 && data[2] == 1) sc = 3;
+    if (size <= sc) return false;
+    if (sc == 0) {
+        static const uint8_t start[4] = {0, 0, 0, 1};
+        au.insert(au.end(), start, start + 4);
+    }
+    au.insert(au.end(), data, data + size);
+    const int nalType = (data[sc] >> 1) & 0x3f;
+    return nalType < 32;   // VCL (a slice); VPS/SPS/PPS/AUD/SEI ride along with the next slice
+}
+
+// Send one access unit and collect what the decoder gives back. hevc_v4l2m2m returns a frame
+// about 2 ms after its own submit, never in a receive call straight after it; without the
+// poll, each frame waited for the next submit and came out one frame late.
+void VideoDecoder::sendAccessUnit(uint8_t* data, int size, int64_t ptsUs)
+{
+    constexpr double kPollMs = 8.0;
+    packet_->data = data;
+    packet_->size = size;
+    packet_->pts = ptsUs;
+    const auto t0 = std::chrono::steady_clock::now();
+    int sret = avcodec_send_packet(codec_, packet_);
+    if (sret == AVERROR(EAGAIN)) {
+        // The decoder's input queue is full: take what it has finished, then offer the packet
+        // once more. Only a second refusal drops the access unit.
+        while (avcodec_receive_frame(codec_, frame_) >= 0) {
+            width_ = frame_->width;
+            height_ = frame_->height;
+            convertToLatest();
+        }
+        sret = avcodec_send_packet(codec_, packet_);
+    }
+    if (sret < 0) {
+        std::lock_guard<std::mutex> lk(latestMutex_);
+        needKeyframe_ = true;
+        return;
+    }
+    bool gotOne = false;
+    for (;;) {
+        int rret = avcodec_receive_frame(codec_, frame_);
+        if (rret == AVERROR(EAGAIN) && !gotOne &&
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() < kPollMs) {
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
+            continue;
+        }
+        if (rret == AVERROR(EAGAIN) || rret == AVERROR_EOF) break;
+        gotOne = true;
+        if (rret < 0) {  // decode error — a reference frame was likely lost
+            std::lock_guard<std::mutex> lk(latestMutex_);
+            needKeyframe_ = true;
+            break;
+        }
+        width_ = frame_->width;
+        height_ = frame_->height;
+        convertToLatest();
+        double ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t0).count();
+        std::lock_guard<std::mutex> lk(latestMutex_);
+        lastDecodeMs_ = ms;
+    }
 }
 
 void VideoDecoder::SubmitNal(const uint8_t* data, size_t size, int64_t ptsUs)
 {
     if (!codec_ || !parser_ || size == 0) return;
-    lastSubmitPtsUs_ = ptsUs;
+    if (streamCodecId_ == AV_CODEC_ID_HEVC) {
+        // av_parser_parse2 can only close an access unit when the NEXT one's first bytes arrive,
+        // so every frame sat in the parser for a frame interval (0 of 5,400 submits got their own
+        // picture out in the same call). The receiver already delivers whole NALs with their
+        // frame's pts, so the access unit is assembled here instead.
+        if (au_.size() + size > kMaxAccessUnitBytes) {
+            LOG_ERR("access unit over %zu bytes without a slice; dropped, keyframe requested",
+                    kMaxAccessUnitBytes);
+            au_.clear();
+            std::lock_guard<std::mutex> lk(latestMutex_);
+            needKeyframe_ = true;
+            return;
+        }
+        if (!AppendNalToAccessUnit(au_, data, size)) return;
+        au_.insert(au_.end(), AV_INPUT_BUFFER_PADDING_SIZE, 0);
+        sendAccessUnit(au_.data(), (int)(au_.size() - AV_INPUT_BUFFER_PADDING_SIZE), ptsUs);
+        au_.clear();
+        return;
+    }
     const uint8_t* p = data;
     size_t remaining = size;
     while (remaining > 0) {
@@ -197,6 +295,7 @@ void VideoDecoder::closeInternal()
     if (packet_) av_packet_free(&packet_);
     if (codec_) avcodec_free_context(&codec_);
     if (fmt_) avformat_close_input(&fmt_);
+    au_.clear();
     videoStream_ = -1;
 }
 
