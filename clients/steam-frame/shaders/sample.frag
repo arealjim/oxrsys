@@ -13,7 +13,14 @@ layout(push_constant) uniform Push {
     vec2 edgeRatio;
     vec2 eyeSizeRatio;   // optimized/aligned padding compensation
     int  foveated;       // 0 = plain SBS sampling
+    int  srgbTarget;     // 1 = the attachment is *_SRGB and encodes on store
 } pc;
+
+// The video texture is UNORM holding gamma-encoded values; an sRGB attachment encodes again
+// on store, so linearise first or the compositor gets sRGB(sRGB(x)).
+vec3 srgbToLinear(vec3 c) {
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+}
 
 // Axis-aligned foveated-encoding forward map (matches oxrsys / ALVR AADT).
 // CPU mirror + accuracy test: tests/foveation_warp.h (keep the two in sync).
@@ -58,5 +65,6 @@ void main() {
     }
     corrected = clamp(corrected, vec2(0.0), vec2(1.0));
     vec2 sourceUv = mix(pc.sourceMin, pc.sourceMax, corrected);
-    outColor = vec4(texture(uVideo, sourceUv).rgb, 1.0);
+    vec3 c = texture(uVideo, sourceUv).rgb;
+    outColor = vec4(pc.srgbTarget != 0 ? srgbToLinear(c) : c, 1.0);
 }

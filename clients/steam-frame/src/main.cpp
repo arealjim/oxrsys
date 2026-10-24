@@ -129,6 +129,7 @@ struct PushConstants {
     float edgeRatio[2];
     float eyeSizeRatio[2];
     int32_t foveated;
+    int32_t srgbTarget;   // the eye swapchain is *_SRGB: the shader linearises before the store
 };
 
 static VideoDecoder g_decoder;
@@ -878,6 +879,7 @@ static bool RenderEye(App& app, uint32_t eye, uint32_t imageIndex)
         pc.centerShift[0] = fv.centerShift[0]; pc.centerShift[1] = fv.centerShift[1];
         pc.edgeRatio[0] = fv.edgeRatio[0]; pc.edgeRatio[1] = fv.edgeRatio[1];
         pc.eyeSizeRatio[0] = fv.eyeSizeRatio[0]; pc.eyeSizeRatio[1] = fv.eyeSizeRatio[1];
+        pc.srgbTarget = (sc.format == VK_FORMAT_R8G8B8A8_SRGB || sc.format == VK_FORMAT_B8G8R8A8_SRGB) ? 1 : 0;
         vkCmdPushConstants(app.cmdBuffer, app.pipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(pc), &pc);
         vkCmdDraw(app.cmdBuffer, 3, 1, 0, 0);
