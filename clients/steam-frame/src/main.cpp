@@ -959,6 +959,89 @@ static void PollEvents(App& app)
     }
 }
 
+// Head-centre pose (VIEW space, falling back to view[0]) and the left-eye FOV into the upstream
+// packet. Shared by the visible frame path and the hidden-session keepalive.
+static void FillHeadTracking(App& app, XrTime t, const XrView* views,
+                             oxr::protocol::TrackingPacket& pkt)
+{
+    pkt.timestampNs = t;
+    // Head-center pose (VIEW space), not the left eye — the server
+    // applies its own IPD to derive the stereo pair, so a half-IPD
+    // offset here would skew what it renders. Fall back to view[0].
+    XrPosef head = views[0].pose;
+    XrSpaceLocation hl = {XR_TYPE_SPACE_LOCATION};
+    if (app.viewSpace &&
+        XR_SUCCEEDED(xrLocateSpace(app.viewSpace, app.stageSpace, t, &hl)) &&
+        (hl.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
+        (hl.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+        head = hl.pose;
+    }
+    pkt.headPosition[0] = head.position.x;
+    pkt.headPosition[1] = head.position.y;
+    pkt.headPosition[2] = head.position.z;
+    pkt.headOrientation[0] = head.orientation.x;
+    pkt.headOrientation[1] = head.orientation.y;
+    pkt.headOrientation[2] = head.orientation.z;
+    pkt.headOrientation[3] = head.orientation.w;
+    // Left-eye FOV (radians, OpenXR-signed). The server normalizes gaze against this
+    // to place the foveal centre; without it it falls back to a 45 degree guess.
+    pkt.eyeFov[0] = views[0].fov.angleLeft;
+    pkt.eyeFov[1] = views[0].fov.angleRight;
+    pkt.eyeFov[2] = views[0].fov.angleUp;
+    pkt.eyeFov[3] = views[0].fov.angleDown;
+}
+
+// The FOV the wearer last saw, held for the hidden-session keepalive. Unworn, SteamVR's
+// xrLocateViews keeps the pose still but changes the FOV on almost every frame (712 of 720
+// measured), and the server projects each packet's eyeFov as it comes: a zoom shimmer in its
+// output with the headset on the table. Zero until first seen.
+static float g_heldFov[4] = {0, 0, 0, 0};
+static bool g_haveHeldFov = false;
+
+// The runtime is hiding the session (SteamVR: the headset is idle or off the head), so the
+// visible path below does not run, but the server drops a client after 3 s without tracking.
+// Keep the head pose flowing so the session survives until the wearer looks again. An unworn
+// headset's view pose is often invalid; only a valid one is sent, otherwise the last valid
+// packet is re-stamped (sending the invalid identity pose made the server alternate between
+// the real pose and the origin).
+static void SendHiddenKeepalive(App& app, XrTime t)
+{
+    XrView views[VIEW_COUNT] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
+    XrViewState vstate = {XR_TYPE_VIEW_STATE};
+    XrViewLocateInfo li = {XR_TYPE_VIEW_LOCATE_INFO};
+    li.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    li.displayTime = t;
+    li.space = app.stageSpace;
+    uint32_t got = 0;
+    if (XR_FAILED(xrLocateViews(app.session, &li, &vstate, VIEW_COUNT, &got, views)) ||
+        got != VIEW_COUNT)
+        return;
+    static oxr::protocol::TrackingPacket lastValid{};
+    static bool haveValid = false;
+    const bool poseValid = (vstate.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) &&
+                           (vstate.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT);
+    oxr::protocol::TrackingPacket pkt{};
+    if (poseValid) {
+        FillHeadTracking(app, t, views, pkt);
+        if (!g_haveHeldFov) { memcpy(g_heldFov, pkt.eyeFov, sizeof(g_heldFov)); g_haveHeldFov = true; }
+        memcpy(pkt.eyeFov, g_heldFov, sizeof(g_heldFov));
+        g_xrInput.Update(t, pkt);
+        lastValid = pkt;
+        haveValid = true;
+    } else if (haveValid) {
+        pkt = lastValid;
+        pkt.timestampNs = t;
+    } else {
+        return;
+    }
+    g_stream.SendTrackingPacket(pkt);
+    static bool said = false;
+    if (!said) {
+        LOG_INFO("session hidden by the runtime; sending tracking as keepalive (valid poses only)");
+        said = true;
+    }
+}
+
 static void RenderFrame(App& app)
 {
     XrFrameWaitInfo wi = {XR_TYPE_FRAME_WAIT_INFO};
@@ -972,6 +1055,9 @@ static void RenderFrame(App& app)
         {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW});
     XrCompositionLayerProjection layer = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     bool submitLayer = false;
+
+    if (g_streamMode && !fs.shouldRender)
+        SendHiddenKeepalive(app, fs.predictedDisplayTime);
 
     if (fs.shouldRender) {
         XrView views[VIEW_COUNT] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
@@ -997,33 +1083,9 @@ static void RenderFrame(App& app)
             // for this pose and the game receives the player's input.
             if (g_streamMode) {
                 oxr::protocol::TrackingPacket pkt{};
-                pkt.timestampNs = fs.predictedDisplayTime;
-
-                // Head-center pose (VIEW space), not the left eye — the server
-                // applies its own IPD to derive the stereo pair, so a half-IPD
-                // offset here would skew what it renders. Fall back to view[0].
-                XrPosef head = views[0].pose;
-                XrSpaceLocation hl = {XR_TYPE_SPACE_LOCATION};
-                if (app.viewSpace &&
-                    XR_SUCCEEDED(xrLocateSpace(app.viewSpace, app.stageSpace,
-                                               fs.predictedDisplayTime, &hl)) &&
-                    (hl.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
-                    (hl.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
-                    head = hl.pose;
-                }
-                pkt.headPosition[0] = head.position.x;
-                pkt.headPosition[1] = head.position.y;
-                pkt.headPosition[2] = head.position.z;
-                pkt.headOrientation[0] = head.orientation.x;
-                pkt.headOrientation[1] = head.orientation.y;
-                pkt.headOrientation[2] = head.orientation.z;
-                pkt.headOrientation[3] = head.orientation.w;
-                // Left-eye FOV (radians, OpenXR-signed). The server normalizes gaze against this
-                // to place the foveal centre; without it it falls back to a 45 degree guess.
-                pkt.eyeFov[0] = views[0].fov.angleLeft;
-                pkt.eyeFov[1] = views[0].fov.angleRight;
-                pkt.eyeFov[2] = views[0].fov.angleUp;
-                pkt.eyeFov[3] = views[0].fov.angleDown;
+                FillHeadTracking(app, fs.predictedDisplayTime, views, pkt);
+                memcpy(g_heldFov, pkt.eyeFov, sizeof(g_heldFov));   // what the wearer saw last
+                g_haveHeldFov = true;
                 g_xrInput.Update(fs.predictedDisplayTime, pkt);
                 g_stream.SendTrackingPacket(pkt);
 
