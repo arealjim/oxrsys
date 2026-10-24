@@ -140,6 +140,18 @@ static bool g_streamMode = false;
 static XrInput g_xrInput;
 // The eye separation last sent upstream; the server renders the stereo pair with it.
 static float g_sentIpd = 0.0f;
+static constexpr float kServerDefaultIpd = 0.063f;   // InputManager::DefaultIpd, used when we send 0
+
+// v rotated by the unit quaternion q = (x, y, z, w).
+static XrVector3f RotateByQuat(const float q[4], XrVector3f v)
+{
+    const float tx = 2.0f * (q[1] * v.z - q[2] * v.y);
+    const float ty = 2.0f * (q[2] * v.x - q[0] * v.z);
+    const float tz = 2.0f * (q[0] * v.y - q[1] * v.x);
+    return XrVector3f{v.x + q[3] * tx + (q[1] * tz - q[2] * ty),
+                      v.y + q[3] * ty + (q[2] * tx - q[0] * tz),
+                      v.z + q[3] * tz + (q[0] * ty - q[1] * tx)};
+}
 
 static volatile bool g_running = true;
 static void SignalHandler(int)
@@ -1107,7 +1119,13 @@ static void RenderFrame(App& app)
             }
             for (uint32_t eye = 0; eye < VIEW_COUNT; eye++) {
                 if (haveRenderPose) {
-                    layerPose[eye].position = {rpPos[0], rpPos[1], rpPos[2]};
+                    // Stamp where the server rendered this eye: head +/- right * ipd/2, with the
+                    // IPD it used (the one we sent, or its default when we sent 0). SteamVR honours
+                    // the stamped position, so a head-centre stamp for both eyes is a half-IPD error.
+                    const float ipd = g_sentIpd > 0.0f ? g_sentIpd : kServerDefaultIpd;
+                    const float s = (eye == 0 ? -0.5f : 0.5f) * ipd;
+                    const XrVector3f r = RotateByQuat(rpOri, XrVector3f{1.0f, 0.0f, 0.0f});
+                    layerPose[eye].position = {rpPos[0] + r.x * s, rpPos[1] + r.y * s, rpPos[2] + r.z * s};
                     layerPose[eye].orientation = {rpOri[0], rpOri[1], rpOri[2], rpOri[3]};
                 } else {
                     layerPose[eye] = views[eye].pose;
