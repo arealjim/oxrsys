@@ -138,6 +138,22 @@ static StreamConnection g_stream;
 static bool g_streamMode = false;
 static XrInput g_xrInput;
 
+// The client pipeline as the server's adaptive bitrate reads it, averaged over ~1 s:
+// per fresh frame (received -> submitted -> decoded -> picked up here), per presented frame
+// (both eyes rendered, how old the frame on screen is, repaints, pose fallbacks).
+struct LatencyWindow {
+    double receiveToSubmit = 0, decode = 0, pickup = 0;   // sums over fresh frames
+    double compositor = 0, age = 0;                       // sums over presented frames
+    uint32_t fresh = 0, presented = 0, stale = 0, poseFallbacks = 0;
+};
+static LatencyWindow g_lat;
+static std::chrono::steady_clock::time_point g_presentedReceivedAt{};   // of the frame on screen
+static bool g_presentedValid = false;
+static double MsSince(std::chrono::steady_clock::time_point t)
+{
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+}
+
 static volatile bool g_running = true;
 static void SignalHandler(int)
 {
@@ -1046,8 +1062,17 @@ static void RenderFrame(App& app)
             // last texture — we still re-present it, reprojected (repaint).
             int fw = 0, fh = 0;
             int64_t framePtsUs = 0;
-            bool haveNew = g_streamMode ? g_decoder.TakeLatestRGBA(g_frameBuf, fw, fh, &framePtsUs)
+            VideoDecoder::FrameTiming frameTiming;
+            bool haveNew = g_streamMode ? g_decoder.TakeLatestRGBA(g_frameBuf, fw, fh, &framePtsUs, &frameTiming)
                                         : g_decoder.NextFrameRGBA(g_frameBuf, fw, fh);
+            if (g_streamMode && haveNew && frameTiming.known) {
+                g_lat.receiveToSubmit += frameTiming.receiveToSubmitMs;
+                g_lat.decode += frameTiming.decodeMs;
+                g_lat.pickup += MsSince(frameTiming.outAt);
+                g_lat.fresh++;
+                g_presentedReceivedAt = frameTiming.receivedAt;
+                g_presentedValid = true;
+            }
             // Pose and foveation centre for the frame on screen, cached across repaints of the
             // same texture. Matched by presentation time: the latest received metadata leads
             // the displayed frame by the decode pipeline depth, and a moving foveation centre
@@ -1064,6 +1089,8 @@ static void RenderFrame(App& app)
                 if (g_streamMode &&
                     g_stream.RenderPoseForFrame(framePtsUs, displayedPos, displayedOri)) {
                     displayedPoseValid = true;
+                } else if (g_streamMode) {
+                    g_lat.poseFallbacks++;
                 }
                 static bool dumped = false;
                 if (!dumped && getenv("FRAME_CLIENT_DUMP")) {
@@ -1109,6 +1136,7 @@ static void RenderFrame(App& app)
             // Only present once we have real content (a texture).
             auto compositorT0 = std::chrono::steady_clock::now();
             if (app.videoImage != VK_NULL_HANDLE && app.descriptorWritten) {
+                uint32_t eyesReleased = 0;
                 for (uint32_t eye = 0; eye < VIEW_COUNT; eye++) {
                     Swapchain& sc = app.swapchains[eye];
                     XrSwapchainImageAcquireInfo ai = {XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
@@ -1123,6 +1151,7 @@ static void RenderFrame(App& app)
 
                     XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
                     xrReleaseSwapchainImage(sc.handle, &ri);
+                    eyesReleased++;
 
                     projViews[eye].pose = layerPose[eye];
                     projViews[eye].fov = views[eye].fov;
@@ -1136,14 +1165,29 @@ static void RenderFrame(App& app)
                 layer.views = projViews.data();
                 submitLayer = true;
 
-                // Feed oxrsys's adaptive bitrate: report client latencies ~1/s.
-                if (g_streamMode) {
-                    float compMs = (float)std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - compositorT0).count();
-                    float decMs = (float)g_decoder.LastDecodeMs();
-                    static int lc = 0;
-                    if (lc++ % 72 == 0)
-                        g_stream.SendLatencyReport(decMs, compMs, decMs + compMs, 0);
+                // Feed oxrsys's adaptive bitrate: the measured client pipeline, ~1/s.
+                if (g_streamMode && eyesReleased == VIEW_COUNT) {
+                    g_lat.compositor += MsSince(compositorT0);
+                    g_lat.presented++;
+                    if (!haveNew) g_lat.stale++;
+                    if (g_presentedValid) g_lat.age += MsSince(g_presentedReceivedAt);
+                    if (g_lat.presented >= 72 && g_lat.fresh > 0) {
+                        oxr::protocol::LatencyReport r{};
+                        const double f = g_lat.fresh, p = g_lat.presented;
+                        r.receiveToDecoderSubmitMs = (float)(g_lat.receiveToSubmit / f);
+                        r.decodeLatencyMs = (float)(g_lat.decode / f);
+                        r.compositorLatencyMs = (float)(g_lat.compositor / p);
+                        // A fresh frame: received -> submitted -> out -> picked up -> both eyes done.
+                        r.totalClientLatencyMs = (float)((g_lat.receiveToSubmit + g_lat.decode + g_lat.pickup) / f
+                                                         + g_lat.compositor / p);
+                        r.displayedFrameAgeMs = (float)(g_lat.age / p);   // repaints count, the frame ages
+                        r.reprojectedFrames = 0;   // the runtime's compositor reprojects, not this client
+                        r.staleFrameReuses = g_lat.stale;
+                        r.renderPoseFallbacks = g_lat.poseFallbacks;
+                        r.reprojectionMode = oxr::protocol::ClientReprojectionMode::Pose;
+                        g_stream.SendLatencyReport(r);
+                        g_lat = LatencyWindow{};
+                    }
                 }
             }
         }

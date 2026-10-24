@@ -13,7 +13,7 @@ class VideoDecoder;
 namespace oxr {
 class NetworkReceiver;
 class TrackingSender;
-namespace protocol { struct TrackingPacket; }
+namespace protocol { struct TrackingPacket; struct LatencyReport; }
 }
 
 class StreamConnection {
@@ -44,8 +44,7 @@ public:
 
     // Report client-side latencies over the control channel (V6). oxrsys's
     // adaptive bitrate controller consumes these to tune the encode.
-    void SendLatencyReport(float decodeMs, float compositorMs, float totalMs,
-                           uint32_t reprojectedFrames);
+    void SendLatencyReport(const oxr::protocol::LatencyReport& report);
 
     // Ask the server for a keyframe (IDR) to resync after a decode error / loss.
     void SendKeyframeRequest(uint32_t reasonFlags, uint32_t detail);

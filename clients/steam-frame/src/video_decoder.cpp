@@ -163,6 +163,16 @@ void VideoDecoder::convertToLatest()
 {
     if (!frameToRGBA(sws_, frame_, scratch_)) return;
     const int64_t ptsUs = frame_->pts != AV_NOPTS_VALUE ? frame_->pts : frame_->best_effort_timestamp;
+    FrameTiming timing;
+    timing.outAt = std::chrono::steady_clock::now();
+    for (const PendingSubmit& p : pending_) {
+        if (p.ptsUs != ptsUs) continue;
+        timing.receivedAt = p.receivedAt;
+        timing.receiveToSubmitMs = std::chrono::duration<double, std::milli>(p.submittedAt - p.receivedAt).count();
+        timing.decodeMs = std::chrono::duration<double, std::milli>(timing.outAt - p.submittedAt).count();
+        timing.known = true;
+        break;
+    }
     std::lock_guard<std::mutex> lk(latestMutex_);
     if (queueDepth_ > 0) {
         if (ringCount_ == kRing) {   // the render loop stopped taking: drop the oldest
@@ -174,6 +184,7 @@ void VideoDecoder::convertToLatest()
         r.w = frame_->width;
         r.h = frame_->height;
         r.ptsUs = ptsUs;
+        r.timing = timing;
         ringCount_++;
         return;
     }
@@ -184,6 +195,7 @@ void VideoDecoder::convertToLatest()
     // returns frames late it belongs to a later frame, whose render pose would then be
     // stamped on these pixels. Unmatched is better than mismatched.
     latestPtsUs_ = ptsUs;
+    latestTiming_ = timing;
     if (frame_->pts == AV_NOPTS_VALUE && (noPtsFrames_++ % 300) == 0)
         LOG_ERR("decoded frame without pts (%llu so far): its render pose cannot be matched",
                 (unsigned long long)noPtsFrames_);
@@ -215,6 +227,7 @@ void VideoDecoder::sendAccessUnit(uint8_t* data, int size, int64_t ptsUs)
     packet_->size = size;
     packet_->pts = ptsUs;
     const auto t0 = std::chrono::steady_clock::now();
+    pending_[(pendingNext_ - 1) % 32].submittedAt = t0;
     int sret = avcodec_send_packet(codec_, packet_);
     if (sret == AVERROR(EAGAIN)) {
         // The decoder's input queue is full: take what it has finished, then offer the packet
@@ -273,6 +286,10 @@ void VideoDecoder::SubmitNal(const uint8_t* data, size_t size, int64_t ptsUs)
             return;
         }
         if (!AppendNalToAccessUnit(au_, data, size)) return;
+        // The access unit is complete with this NAL: that is when it was received.
+        PendingSubmit& slot = pending_[pendingNext_++ % 32];
+        slot.ptsUs = ptsUs;
+        slot.receivedAt = slot.submittedAt = std::chrono::steady_clock::now();
         au_.insert(au_.end(), AV_INPUT_BUFFER_PADDING_SIZE, 0);
         sendAccessUnit(au_.data(), (int)(au_.size() - AV_INPUT_BUFFER_PADDING_SIZE), ptsUs);
         au_.clear();
@@ -326,7 +343,7 @@ void VideoDecoder::SetQueueDepth(int depth)
 }
 
 bool VideoDecoder::TakeLatestRGBA(std::vector<uint8_t>& out, int& width, int& height,
-                                  int64_t* outPtsUs)
+                                  int64_t* outPtsUs, FrameTiming* outTiming)
 {
     std::lock_guard<std::mutex> lk(latestMutex_);
     if (queueDepth_ > 0) {
@@ -342,6 +359,7 @@ bool VideoDecoder::TakeLatestRGBA(std::vector<uint8_t>& out, int& width, int& he
         width = r.w;
         height = r.h;
         if (outPtsUs != nullptr) *outPtsUs = r.ptsUs;
+        if (outTiming != nullptr) *outTiming = r.timing;
         return true;
     }
     if (!latestFresh_ || latest_.empty()) return false;
@@ -350,6 +368,9 @@ bool VideoDecoder::TakeLatestRGBA(std::vector<uint8_t>& out, int& width, int& he
     height = latestH_;
     if (outPtsUs != nullptr) {
         *outPtsUs = latestPtsUs_;
+    }
+    if (outTiming != nullptr) {
+        *outTiming = latestTiming_;
     }
     latestFresh_ = false;
     return true;

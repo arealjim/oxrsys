@@ -214,6 +214,30 @@ void test_frame_queue()
         dec.Close();
     }
 
+    SECTION("video_decoder: every frame taken carries its own receive/submit/out times");
+    {
+        VideoDecoder dec;
+        CHECK(dec.OpenStream(VideoDecoder::Codec::H265));
+        std::vector<uint8_t> rgba; int w = 0, h = 0;
+        int64_t pts = 1000000;
+        int frames = 0, known = 0, sane = 0;
+        for (const auto& nal : nals) {
+            dec.SubmitNal(nal.data(), nal.size(), pts);
+            if (hevcType(nal) >= 0 && hevcType(nal) < 32) pts += 33333;
+            int64_t got = 0;
+            VideoDecoder::FrameTiming t;
+            while (dec.TakeLatestRGBA(rgba, w, h, &got, &t)) {
+                frames++;
+                if (t.known) known++;
+                if (t.known && t.receiveToSubmitMs >= 0 && t.decodeMs >= 0 && t.outAt >= t.receivedAt) sane++;
+            }
+        }
+        CHECK(frames > 80);
+        CHECK(known == frames);
+        CHECK(sane == frames);
+        dec.Close();
+    }
+
     SECTION("video_decoder: depth 0 keeps the latest-only slot");
     {
         VideoDecoder dec;

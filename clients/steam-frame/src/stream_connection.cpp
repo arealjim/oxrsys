@@ -197,17 +197,11 @@ bool StreamConnection::RenderPoseForFrame(int64_t presentationTimeUs, float outP
     return true;
 }
 
-void StreamConnection::SendLatencyReport(float decodeMs, float compositorMs, float totalMs,
-                                         uint32_t reprojectedFrames)
+void StreamConnection::SendLatencyReport(const protocol::LatencyReport& report)
 {
     if (!connected_ || controlSocket_ < 0) return;
-    protocol::LatencyReport r{};
+    protocol::LatencyReport r = report;
     r.type = protocol::ControlType::LatencyReport;
-    r.receiveToDecoderSubmitMs = 0.0f; // best-effort; decode+compositor dominate
-    r.decodeLatencyMs = decodeMs;
-    r.compositorLatencyMs = compositorMs;
-    r.totalClientLatencyMs = totalMs;
-    r.reprojectedFrames = reprojectedFrames;
     send(controlSocket_, &r, sizeof(r), 0);
 }
 

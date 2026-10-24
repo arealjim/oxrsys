@@ -44,10 +44,20 @@ public:
     // frame's pts). They are gathered into one access unit, sent to the decoder as one packet with
     // that pts when the slice arrives, and the decoder is polled briefly for that frame's own output.
     void SubmitNal(const uint8_t* data, size_t size, int64_t ptsUs);
+    // Where one frame's time went on this side, for the latency report the server's adaptive
+    // bitrate steers on. Matched to the frame by pts (a hardware decoder is a pipeline: the
+    // frame comes out on a later call than the one that fed it).
+    struct FrameTiming {
+        std::chrono::steady_clock::time_point receivedAt{};  // access unit complete, handed to us
+        std::chrono::steady_clock::time_point outAt{};       // decoded + converted, takeable
+        double receiveToSubmitMs = 0.0;                      // -> avcodec_send_packet
+        double decodeMs = 0.0;                               // send_packet -> frame out
+        bool known = false;                                  // false if the submit record was not found
+    };
     // Called from the render thread; true if a newer decoded frame was taken. `out` is
     // swapped, not copied (the buffers rotate between the two threads).
     bool TakeLatestRGBA(std::vector<uint8_t>& out, int& width, int& height,
-                        int64_t* outPtsUs = nullptr);
+                        int64_t* outPtsUs = nullptr, FrameTiming* outTiming = nullptr);
     // A short in-order queue between the decoder and the render loop (FRAME_CLIENT_QUEUE,
     // default 2; 0 = the latest-only slot). Two frames that land in one display period no
     // longer overwrite each other: the render loop takes the oldest, and a backlog beyond the
@@ -105,7 +115,16 @@ private:
         std::vector<uint8_t> buf;
         int w = 0, h = 0;
         int64_t ptsUs = 0;
+        FrameTiming timing;
     };
+    FrameTiming latestTiming_;
+    // Receive and submit times of the access units still inside the decoder (net thread only).
+    struct PendingSubmit {
+        int64_t ptsUs = -1;
+        std::chrono::steady_clock::time_point receivedAt{}, submittedAt{};
+    };
+    PendingSubmit pending_[32];
+    unsigned pendingNext_ = 0;
     static constexpr int kRing = 4;
     Ready ring_[kRing];
     int ringHead_ = 0, ringCount_ = 0;
