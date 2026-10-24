@@ -471,21 +471,36 @@ bool NetworkReceiver::TakeRenderPoseForPresentationTimeUs(int64_t presentationTi
 {
     std::lock_guard<std::mutex> lock(renderPoseMutex_);
 
+    // Nearest pose within half a frame interval (72 Hz: 13.9 ms, so 7 ms), not an exact
+    // match: with hevc_v4l2m2m the exact-microsecond test missed about 22 % of frames.
+    constexpr int64_t kMatchToleranceUs = 7000;
+    auto best = renderPoses_.end();
+    int64_t bestDelta = kMatchToleranceUs + 1;
     for (auto it = renderPoses_.begin(); it != renderPoses_.end(); ++it)
     {
-        if (it->presentationTimeUs == presentationTimeUs)
+        int64_t d = it->presentationTimeUs - presentationTimeUs;
+        if (d < 0) d = -d;
+        if (d < bestDelta)
         {
-            if (outPose != nullptr)
-            {
-                *outPose = *it;
-            }
-            renderPoses_.erase(renderPoses_.begin(), std::next(it));
-            return true;
+            bestDelta = d;
+            best = it;
         }
     }
+    if (best != renderPoses_.end())
+    {
+        if (outPose != nullptr)
+        {
+            *outPose = *best;
+        }
+        // Drop this pose and everything older; later frames only need newer poses.
+        renderPoses_.erase(renderPoses_.begin(), std::next(best));
+        return true;
+    }
 
+    // No pose within tolerance: drop what is already older than this frame so the deque
+    // does not grow, and report a miss.
     while (!renderPoses_.empty() &&
-           renderPoses_.front().presentationTimeUs < presentationTimeUs)
+           renderPoses_.front().presentationTimeUs < presentationTimeUs - kMatchToleranceUs)
     {
         renderPoses_.pop_front();
     }

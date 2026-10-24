@@ -1057,6 +1057,10 @@ static void RenderFrame(App& app)
             static bool displayedPoseValid = false;
             if (haveNew && fw > 0 && fh > 0) {
                 UploadVideoFrame(app, g_frameBuf.data(), (uint32_t)fw, (uint32_t)fh);
+                // A new frame must not inherit the previous frame's pose: a fresh image under a
+                // stale stamp is warped the wrong way and snaps back on the next match (shake).
+                // A miss falls through to the newest received pose below.
+                displayedPoseValid = false;
                 if (g_streamMode &&
                     g_stream.RenderPoseForFrame(framePtsUs, displayedPos, displayedOri)) {
                     displayedPoseValid = true;
