@@ -6,6 +6,8 @@
 // Also owns the upstream TrackingSender (used from V3 on).
 
 #pragma once
+#include <oxrsys/protocol/Protocol.h>
+
 #include <cstdint>
 #include <string>
 
@@ -72,7 +74,13 @@ public:
 
     void Disconnect();
 
+    // The rate the panel really runs (read back from the runtime). Used for the ClientConnect
+    // refresh rate; a change while connected re-sends ClientConnect so the server paces to it.
+    void SetPanelRefreshHz(uint32_t hz);
+
 private:
+    uint32_t panelRefreshHz_ = 0;
+    oxr::protocol::ClientConnect lastConnect_{};   // the ClientConnect last sent
     oxr::NetworkReceiver* net_ = nullptr;
     oxr::TrackingSender* tracker_ = nullptr;
     int controlSocket_ = -1;

@@ -25,6 +25,7 @@
 
 #include <oxrsys/protocol/Protocol.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -87,6 +88,8 @@ struct App {
     bool hasHandTracking = false;
     bool hasEyeGaze = false;
     bool hasRefreshRate = false;
+    PFN_xrGetDisplayRefreshRateFB pfnGetRefresh = nullptr;
+    float panelHz = 0.0f;   // as read back from the runtime
 
     // Vulkan
     VkInstance vkInstance = VK_NULL_HANDLE;
@@ -923,6 +926,23 @@ static void RequestMaxRefreshRate(App& app)
         LOG_INFO("display refresh rate change not supported by this runtime (%.0f Hz requested)", best);
 }
 
+// The rate the panel really runs. On the Steam Frame the request above succeeds and reads back,
+// yet about a second into the session the compositor moves the panel to 72 Hz (SteamVR's
+// steamvr.defaultPerAppRefreshRate); xrWaitFrame paces at this number, so the server must too.
+static void ReadPanelRefreshRate(App& app)
+{
+    if (!app.hasRefreshRate) return;
+    if (!app.pfnGetRefresh)
+        xrGetInstanceProcAddr(app.instance, "xrGetDisplayRefreshRateFB", (PFN_xrVoidFunction*)&app.pfnGetRefresh);
+    if (!app.pfnGetRefresh) return;
+    float hz = 0.0f;
+    if (XR_FAILED(app.pfnGetRefresh(app.session, &hz)) || hz <= 0.0f) return;
+    if (std::fabs(hz - app.panelHz) <= 0.5f) return;
+    LOG_INFO("panel refresh rate: %.2f Hz%s", hz, app.panelHz > 0 ? " (changed)" : "");
+    app.panelHz = hz;
+    g_stream.SetPanelRefreshHz((uint32_t)std::lround(hz));
+}
+
 static void PollEvents(App& app)
 {
     XrEventDataBuffer ev = {XR_TYPE_EVENT_DATA_BUFFER};
@@ -983,6 +1003,15 @@ static void RenderFrame(App& app)
             if (fc++ % 120 == 0) {
                 auto& p = views[0].pose.position;
                 LOG_INFO("head view[0] pos=(%.3f, %.3f, %.3f)", p.x, p.y, p.z);
+            }
+
+            if (g_streamMode) {   // once a second: the runtime may move the panel rate under us
+                static auto lastRateRead = std::chrono::steady_clock::time_point{};
+                const auto now = std::chrono::steady_clock::now();
+                if (now - lastRateRead >= std::chrono::seconds(1)) {
+                    lastRateRead = now;
+                    ReadPanelRefreshRate(app);
+                }
             }
 
             // Ship head + controllers + hands upstream so the server renders

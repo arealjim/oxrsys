@@ -28,6 +28,17 @@ StreamConnection::StreamConnection()
 
 StreamConnection::~StreamConnection() { Disconnect(); delete net_; delete tracker_; }
 
+void StreamConnection::SetPanelRefreshHz(uint32_t hz)
+{
+    if (hz == 0 || hz == panelRefreshHz_) return;
+    panelRefreshHz_ = hz;
+    if (!connected_ || controlSocket_ < 0) return;
+    // The server re-negotiates on a ClientConnect from the connected address (one encoder rebuild).
+    lastConnect_.refreshRateHz = hz;
+    LOG_INF("panel refresh changed to %u Hz: re-sending ClientConnect so the server paces to it", hz);
+    if (send(controlSocket_, &lastConnect_, sizeof(lastConnect_), 0) < 0) LOG_ERR("ClientConnect re-send failed");
+}
+
 bool StreamConnection::Connect(VideoDecoder* decoder, int timeoutMs)
 {
     std::atomic<bool> found{false};
@@ -117,7 +128,9 @@ bool StreamConnection::Connect(VideoDecoder* decoder, int timeoutMs)
     cc.type = protocol::MessageType::ClientConnect;
     cc.preferredCodec = (uint32_t)protocol::VideoCodec::H265;
     cc.maxBitrateMbps = protocol::CLIENT_MAX_BITRATE_USE_SERVER_CONFIG;
-    cc.refreshRateHz = srv.refreshRateHz ? srv.refreshRateHz : 90;
+    // Pace the server at the rate the panel really runs; the server's configured rate is only the
+    // fallback. A mismatch is a fifth of the frames skipped (server 90, panel 72).
+    cc.refreshRateHz = panelRefreshHz_ ? panelRefreshHz_ : (srv.refreshRateHz ? srv.refreshRateHz : 90);
     // FOVEATION_CENTER commits us to un-warping every frame with the centre carried in the
     // stream (LatestRenderPose below); without it the server keeps the centre static and the
     // gaze we report drives nothing.
@@ -125,6 +138,7 @@ bool StreamConnection::Connect(VideoDecoder* decoder, int timeoutMs)
                             protocol::CLIENT_CAPABILITY_FOVEATION_CENTER |
                             protocol::CLIENT_CAPABILITY_FEC_INTERLEAVED;
     strncpy(cc.deviceName, "FrameClient", sizeof(cc.deviceName) - 1);
+    lastConnect_ = cc;
     if (send(controlSocket_, &cc, sizeof(cc), 0) < 0) { LOG_ERR("ClientConnect send failed"); return false; }
 
     LOG_INF("connected — ClientConnect sent, receiving video");
