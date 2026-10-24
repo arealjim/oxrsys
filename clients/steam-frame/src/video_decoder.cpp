@@ -130,6 +130,7 @@ bool VideoDecoder::openCodecOnly(int avCodecId)
 bool VideoDecoder::OpenStream(Codec codec)
 {
     streamMode_ = true;
+    if (const char* q = getenv("FRAME_CLIENT_QUEUE")) SetQueueDepth(atoi(q));
     int id = (codec == Codec::H264) ? AV_CODEC_ID_H264 : AV_CODEC_ID_HEVC;
     streamCodecId_ = id;
     au_.clear();
@@ -160,16 +161,29 @@ bool VideoDecoder::ReconfigureStream(int width, int height)
 
 void VideoDecoder::convertToLatest()
 {
-    std::vector<uint8_t> rgba;
-    if (!frameToRGBA(sws_, frame_, rgba)) return;
+    if (!frameToRGBA(sws_, frame_, scratch_)) return;
+    const int64_t ptsUs = frame_->pts != AV_NOPTS_VALUE ? frame_->pts : frame_->best_effort_timestamp;
     std::lock_guard<std::mutex> lk(latestMutex_);
-    latest_.swap(rgba);
+    if (queueDepth_ > 0) {
+        if (ringCount_ == kRing) {   // the render loop stopped taking: drop the oldest
+            ringHead_ = (ringHead_ + 1) % kRing;
+            ringCount_--;
+        }
+        Ready& r = ring_[(ringHead_ + ringCount_) % kRing];
+        r.buf.swap(scratch_);
+        r.w = frame_->width;
+        r.h = frame_->height;
+        r.ptsUs = ptsUs;
+        ringCount_++;
+        return;
+    }
+    latest_.swap(scratch_);
     latestW_ = frame_->width;
     latestH_ = frame_->height;
     // Never borrow the latest submit's pts for a frame without one: with a decoder that
     // returns frames late it belongs to a later frame, whose render pose would then be
     // stamped on these pixels. Unmatched is better than mismatched.
-    latestPtsUs_ = frame_->pts != AV_NOPTS_VALUE ? frame_->pts : frame_->best_effort_timestamp;
+    latestPtsUs_ = ptsUs;
     if (frame_->pts == AV_NOPTS_VALUE && (noPtsFrames_++ % 300) == 0)
         LOG_ERR("decoded frame without pts (%llu so far): its render pose cannot be matched",
                 (unsigned long long)noPtsFrames_);
@@ -304,12 +318,34 @@ void VideoDecoder::SubmitNal(const uint8_t* data, size_t size, int64_t ptsUs)
     }
 }
 
+void VideoDecoder::SetQueueDepth(int depth)
+{
+    std::lock_guard<std::mutex> lk(latestMutex_);
+    queueDepth_ = depth < 0 ? 0 : (depth > kRing - 1 ? kRing - 1 : depth);
+    ringHead_ = ringCount_ = 0;
+}
+
 bool VideoDecoder::TakeLatestRGBA(std::vector<uint8_t>& out, int& width, int& height,
                                   int64_t* outPtsUs)
 {
     std::lock_guard<std::mutex> lk(latestMutex_);
+    if (queueDepth_ > 0) {
+        if (ringCount_ == 0) return false;
+        while (ringCount_ > queueDepth_) {   // backlog: catch up to the newest `depth` frames
+            ringHead_ = (ringHead_ + 1) % kRing;
+            ringCount_--;
+        }
+        Ready& r = ring_[ringHead_];
+        ringHead_ = (ringHead_ + 1) % kRing;
+        ringCount_--;
+        out.swap(r.buf);   // the taken buffer goes back into the ring for reuse
+        width = r.w;
+        height = r.h;
+        if (outPtsUs != nullptr) *outPtsUs = r.ptsUs;
+        return true;
+    }
     if (!latestFresh_ || latest_.empty()) return false;
-    out = latest_;
+    out.swap(latest_);   // rotate buffers: no per-frame copy
     width = latestW_;
     height = latestH_;
     if (outPtsUs != nullptr) {

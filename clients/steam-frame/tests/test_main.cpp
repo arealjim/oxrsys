@@ -8,6 +8,7 @@ int g_checks = 0;
 
 void test_video_decoder();
 void test_access_units();
+void test_frame_queue();
 void test_protocol_fec();
 void test_foveation();
 
@@ -15,6 +16,7 @@ int main()
 {
     test_video_decoder();
     test_access_units();
+    test_frame_queue();
     test_protocol_fec();
     test_foveation();
     printf("\n%d checks, %d failures\n", g_checks, g_failures);

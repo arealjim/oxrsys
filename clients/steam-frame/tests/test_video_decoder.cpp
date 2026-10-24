@@ -127,3 +127,103 @@ void test_access_units()
     CHECK(w == 1920 && h == 1080);
     dec.Close();
 }
+
+// Decode the clip NAL by NAL; after every `takeEvery` slices the render loop runs `takes` display
+// periods, one take each (drain: take everything ready). Returns the pts taken, in order.
+static std::vector<int64_t> decodeTaking(VideoDecoder& dec, const std::vector<std::vector<uint8_t>>& nals,
+                                         int takeEvery, bool drain, int& slicesOut, int takes = 1)
+{
+    std::vector<int64_t> taken;
+    std::vector<uint8_t> rgba;
+    int w = 0, h = 0, slices = 0;
+    int64_t pts = 1000000;
+    for (const auto& nal : nals) {
+        dec.SubmitNal(nal.data(), nal.size(), pts);
+        if (hevcType(nal) >= 0 && hevcType(nal) < 32) {
+            pts += 33333;
+            if (++slices % takeEvery == 0) {
+                int64_t got = 0;
+                for (int t = 0; drain || t < takes; t++) {
+                    if (!dec.TakeLatestRGBA(rgba, w, h, &got)) break;
+                    taken.push_back(got);
+                }
+            }
+        }
+    }
+    int64_t got = 0;
+    while (drain && dec.TakeLatestRGBA(rgba, w, h, &got)) taken.push_back(got);
+    slicesOut = slices;
+    return taken;
+}
+
+static bool isSubsequence(const std::vector<int64_t>& sub, const std::vector<int64_t>& seq)
+{
+    size_t j = 0;
+    for (int64_t v : seq) if (j < sub.size() && sub[j] == v) j++;
+    return j == sub.size();
+}
+
+void test_frame_queue()
+{
+    std::ifstream f(std::string(TEST_ASSET_DIR) + "/stereo_test.hevc", std::ios::binary);
+    std::vector<uint8_t> es((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const auto nals = splitNals(es);
+    int slices = 0;
+
+    // Reference: every frame the decoder puts out, in its output order (the clip has B-frames,
+    // so that is not submit order). Depth 3, drained after every submit, never cuts a backlog.
+    std::vector<int64_t> all;
+    {
+        VideoDecoder dec;
+        CHECK(dec.OpenStream(VideoDecoder::Codec::H265));
+        dec.SetQueueDepth(3);
+        all = decodeTaking(dec, nals, 1, true, slices);
+        dec.Close();
+    }
+
+    SECTION("video_decoder: two frames in one display period both reach the screen");
+    {
+        VideoDecoder dec;
+        CHECK(dec.OpenStream(VideoDecoder::Codec::H265));
+        CHECK(dec.QueueDepth() == 2);
+        CHECK(all.size() + 6 >= (size_t)slices);
+        // Frames land in pairs (the sender's pacing jitter across the pickup boundary) and the
+        // render loop takes one per period: a frame that lands while another waits queues
+        // behind it instead of replacing it. The latest-only slot loses half of them here.
+        const auto taken = decodeTaking(dec, nals, 2, false, slices, 2);
+        std::vector<int64_t> rest = taken;
+        std::vector<uint8_t> rgba; int w = 0, h = 0; int64_t p = 0;
+        while (dec.TakeLatestRGBA(rgba, w, h, &p)) rest.push_back(p);
+        CHECK(isSubsequence(rest, all));
+        CHECK(rest.size() + 2 >= all.size());
+        dec.Close();
+    }
+
+    SECTION("video_decoder: a backlog is cut to the newest `depth` frames");
+    {
+        VideoDecoder dec;
+        CHECK(dec.OpenStream(VideoDecoder::Codec::H265));
+        // One take per three submits: the queue catches up instead of falling further behind.
+        const auto taken = decodeTaking(dec, nals, 3, false, slices);
+        CHECK(isSubsequence(taken, all));
+        CHECK(taken.size() + 2 >= (size_t)slices / 3);
+        // The last frame taken is within depth (+ the reorder delay) of the newest decoded.
+        size_t idx = 0;
+        for (size_t i = 0; i < all.size(); i++) if (!taken.empty() && all[i] == taken.back()) idx = i;
+        CHECK(idx + 2 + 6 >= all.size());
+        dec.Close();
+    }
+
+    SECTION("video_decoder: depth 0 keeps the latest-only slot");
+    {
+        VideoDecoder dec;
+        CHECK(dec.OpenStream(VideoDecoder::Codec::H265));
+        dec.SetQueueDepth(0);
+        const auto taken = decodeTaking(dec, nals, 3, false, slices);
+        CHECK(isSubsequence(taken, all));
+        std::vector<uint8_t> rgba; int w = 0, h = 0;
+        dec.TakeLatestRGBA(rgba, w, h);
+        CHECK(!dec.TakeLatestRGBA(rgba, w, h));   // one slot: nothing left after one take
+        dec.Close();
+    }
+}

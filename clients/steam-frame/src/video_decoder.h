@@ -44,9 +44,16 @@ public:
     // frame's pts). They are gathered into one access unit, sent to the decoder as one packet with
     // that pts when the slice arrives, and the decoder is polled briefly for that frame's own output.
     void SubmitNal(const uint8_t* data, size_t size, int64_t ptsUs);
-    // Called from the render thread; true if a newer decoded frame was taken.
+    // Called from the render thread; true if a newer decoded frame was taken. `out` is
+    // swapped, not copied (the buffers rotate between the two threads).
     bool TakeLatestRGBA(std::vector<uint8_t>& out, int& width, int& height,
                         int64_t* outPtsUs = nullptr);
+    // A short in-order queue between the decoder and the render loop (FRAME_CLIENT_QUEUE,
+    // default 2; 0 = the latest-only slot). Two frames that land in one display period no
+    // longer overwrite each other: the render loop takes the oldest, and a backlog beyond the
+    // depth is cut to the newest `depth` frames so the added latency stays under one period.
+    void SetQueueDepth(int depth);
+    int QueueDepth() const { return queueDepth_; }
 
     void Close();
     int Width() const { return width_; }
@@ -93,6 +100,17 @@ private:
     std::vector<uint8_t> au_;      // HEVC access unit being assembled (stream mode)
     uint64_t noPtsFrames_ = 0;
     bool latestFresh_ = false;
+    // Queue mode (queueDepth_ > 0): ring of decoded frames, oldest first, under latestMutex_.
+    struct Ready {
+        std::vector<uint8_t> buf;
+        int w = 0, h = 0;
+        int64_t ptsUs = 0;
+    };
+    static constexpr int kRing = 4;
+    Ready ring_[kRing];
+    int ringHead_ = 0, ringCount_ = 0;
+    int queueDepth_ = 2;
+    std::vector<uint8_t> scratch_;   // the buffer convertToLatest fills, then swaps in
     double lastDecodeMs_ = 0.0;
     bool needKeyframe_ = false;
 };
