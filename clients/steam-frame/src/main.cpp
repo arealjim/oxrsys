@@ -25,6 +25,7 @@
 
 #include <oxrsys/protocol/Protocol.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -137,6 +138,8 @@ static std::string g_videoPath;
 static StreamConnection g_stream;
 static bool g_streamMode = false;
 static XrInput g_xrInput;
+// The eye separation last sent upstream; the server renders the stereo pair with it.
+static float g_sentIpd = 0.0f;
 
 static volatile bool g_running = true;
 static void SignalHandler(int)
@@ -1016,6 +1019,15 @@ static void RenderFrame(App& app)
                 pkt.eyeFov[1] = views[0].fov.angleRight;
                 pkt.eyeFov[2] = views[0].fov.angleUp;
                 pkt.eyeFov[3] = views[0].fov.angleDown;
+                {   // The server renders the stereo pair with this separation; 0 makes it fall back
+                    // to its 63 mm default. Off-head view poses can be junk, hence the range.
+                    const float dx = views[1].pose.position.x - views[0].pose.position.x;
+                    const float dy = views[1].pose.position.y - views[0].pose.position.y;
+                    const float dz = views[1].pose.position.z - views[0].pose.position.z;
+                    const float sep = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    pkt.ipd = (sep > 0.045f && sep < 0.085f) ? sep : 0.0f;
+                    g_sentIpd = pkt.ipd;
+                }
                 g_xrInput.Update(fs.predictedDisplayTime, pkt);
                 g_stream.SendTrackingPacket(pkt);
 
