@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <netinet/in.h>
 #include <atomic>
 #include <cstdint>
 #include <deque>
@@ -106,6 +107,10 @@ private:
     std::atomic<bool> fecInterleaved_{false};
     int videoSocket_ = -1;
     int discoverySocket_ = -1;
+    // Direct (unicast) discovery target from FRAME_CLIENT_SERVER, for networks that drop the
+    // server's broadcast beacon; the server answers a DiscoveryRequest with its ServerAnnounce.
+    sockaddr_in directServer_ = {};
+    bool haveDirectServer_ = false;
 
     std::thread discoveryThread_;
     std::thread receiveThread_;

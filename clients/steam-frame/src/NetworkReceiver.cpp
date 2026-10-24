@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstring>
 #include <cerrno>
+#include <cstdlib>
 #include <iterator>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -118,6 +119,25 @@ bool NetworkReceiver::StartDiscovery(OnServerFoundCallback callback)
         return false;
     }
 
+    // Optional direct target: FRAME_CLIENT_SERVER=<ipv4>. Broadcast beacons do not cross
+    // routed links (VPNs, client-isolated Wi-Fi), so ask that server for its announce.
+    haveDirectServer_ = false;
+    if (const char* direct = getenv("FRAME_CLIENT_SERVER"))
+    {
+        directServer_ = {};
+        directServer_.sin_family = AF_INET;
+        directServer_.sin_port = htons(protocol::CONTROL_PORT);
+        if (inet_pton(AF_INET, direct, &directServer_.sin_addr) == 1)
+        {
+            haveDirectServer_ = true;
+            LOGI("Direct discovery target %s:%d", direct, protocol::CONTROL_PORT);
+        }
+        else
+        {
+            LOGE("FRAME_CLIENT_SERVER=%s is not an IPv4 address; using broadcast only", direct);
+        }
+    }
+
     discovering_.store(true);
     discoveryThread_ = std::thread(&NetworkReceiver::DiscoveryThread, this, std::move(callback));
     LOGI("Discovery started on port %d", protocol::DISCOVERY_PORT);
@@ -134,11 +154,27 @@ void NetworkReceiver::DiscoveryThread(OnServerFoundCallback callback)
         timeval tv = {1, 0};
         setsockopt(discoverySocket_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
+        if (haveDirectServer_)
+        {
+            // One byte per loop (~1 Hz): the server answers a DiscoveryRequest on
+            // CONTROL_PORT with its ServerAnnounce, sent back to this socket.
+            const uint8_t request = static_cast<uint8_t>(protocol::MessageType::DiscoveryRequest);
+            sendto(discoverySocket_, &request, sizeof(request), 0,
+                   (const sockaddr*)&directServer_, sizeof(directServer_));
+        }
+
         // Use recvfrom() to capture the server's IP address
         sockaddr_in senderAddr = {};
         socklen_t addrLen = sizeof(senderAddr);
         ssize_t received = recvfrom(discoverySocket_, buffer, sizeof(buffer), 0,
                                      (sockaddr*)&senderAddr, &addrLen);
+        // With a pinned server only its announce counts; otherwise the first announcer on the
+        // LAN would get the connection (and the wearer's tracking).
+        if (received > 0 && haveDirectServer_ &&
+            senderAddr.sin_addr.s_addr != directServer_.sin_addr.s_addr)
+        {
+            continue;
+        }
         if (received >= (ssize_t)protocol::SERVER_ANNOUNCE_BASE_SIZE)
         {
             protocol::ServerAnnounce hello = {};
