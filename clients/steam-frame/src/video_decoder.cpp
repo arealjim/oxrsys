@@ -27,6 +27,11 @@ static bool frameToRGBA(SwsContext*& sws, AVFrame* frame, std::vector<uint8_t>& 
                                frame->width, frame->height, AV_PIX_FMT_RGBA,
                                SWS_BILINEAR, nullptr, nullptr, nullptr);
     if (!sws) return false;
+    // Without this swscale converts with BT.601 coefficients; the stream is BT.709 (its VUI
+    // says so), limited range, and the texture wants full-range RGB.
+    const int* bt709 = sws_getCoefficients(SWS_CS_ITU709);
+    sws_setColorspaceDetails(sws, bt709, 0 /* limited-range source */, bt709, 1 /* full-range RGB */,
+                             0, 1 << 16, 1 << 16);
     out.resize((size_t)frame->width * frame->height * 4);
     uint8_t* dst[4] = {out.data(), nullptr, nullptr, nullptr};
     int dstStride[4] = {frame->width * 4, 0, 0, 0};
