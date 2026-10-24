@@ -59,8 +59,18 @@ bool StreamConnection::Connect(VideoDecoder* decoder, int timeoutMs)
     // per-eye target dims (both sides run the same Foveation.h, so they agree).
     if (srv.foveatedEncodingPreset != protocol::FoveationPreset::Off &&
         srv.renderWidth >= 2 && srv.renderHeight > 0) {
-        protocol::FoveationLayout layout = protocol::CalculateFoveationLayout(
-            srv.renderWidth / 2, srv.renderHeight, srv.foveatedEncodingPreset);
+        // Layout from the ANNOUNCED parameters, not the preset's table: a server whose
+        // parameters differ from the table under that preset's name would otherwise give
+        // the table's eye size for a different encode, and un-warp into the wrong pixels.
+        protocol::FoveationPresetParameters announced = {};
+        announced.centerSizeX = srv.foveationCenterSizeX;
+        announced.centerSizeY = srv.foveationCenterSizeY;
+        announced.centerShiftX = srv.foveationCenterShiftX;
+        announced.centerShiftY = srv.foveationCenterShiftY;
+        announced.edgeRatioX = srv.foveationEdgeRatioX;
+        announced.edgeRatioY = srv.foveationEdgeRatioY;
+        protocol::FoveationLayout layout = protocol::CalculateFoveationLayoutFromAligned(
+            srv.renderWidth / 2, srv.renderHeight, srv.foveatedEncodingPreset, announced);
         foveation_.enabled = true;
         foveation_.centerSize[0] = srv.foveationCenterSizeX;
         foveation_.centerSize[1] = srv.foveationCenterSizeY;

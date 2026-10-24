@@ -110,10 +110,27 @@ inline float DecodeCenterShift(int8_t quantized,
         DequantizeCenterShift(quantized), centerSizeAligned, targetSize, edgeRatio);
 }
 
+namespace detail
+{
+// Edge cells on the 2 * edgeRatio grid. ceil() for requested parameters, as the server has always
+// aligned them. For parameters that are already aligned (the announce), the quotient is an
+// integer up to float error, and ceil() of integer + epsilon would add one cell: snap instead.
+inline float EdgeCells(float edgeSize, float edgeRatio, bool inputAligned)
+{
+    const float q = edgeSize / (edgeRatio * 2.0f);
+    if (inputAligned && std::fabs(q - std::round(q)) < 1e-3f)
+    {
+        return std::round(q);
+    }
+    return std::ceil(q);
+}
+
 inline FoveationLayout CalculateFoveationLayout(uint32_t targetEyeWidth,
                                                 uint32_t targetEyeHeight,
                                                 FoveationPreset preset,
-                                                uint32_t alignment = 32)
+                                                FoveationPresetParameters params,
+                                                uint32_t alignment,
+                                                bool inputAligned)
 {
     FoveationLayout layout = {};
     layout.preset = preset;
@@ -122,7 +139,6 @@ inline FoveationLayout CalculateFoveationLayout(uint32_t targetEyeWidth,
     layout.optimizedEyeWidth = targetEyeWidth;
     layout.optimizedEyeHeight = targetEyeHeight;
 
-    FoveationPresetParameters params = ParametersForPreset(preset);
     if (preset == FoveationPreset::Off ||
         targetEyeWidth == 0 ||
         targetEyeHeight == 0 ||
@@ -139,10 +155,10 @@ inline FoveationLayout CalculateFoveationLayout(uint32_t targetEyeWidth,
     const float edgeSizeY = targetH - params.centerSizeY * targetH;
 
     const float centerSizeXAligned =
-        1.0f - std::ceil(edgeSizeX / (params.edgeRatioX * 2.0f)) *
+        1.0f - EdgeCells(edgeSizeX, params.edgeRatioX, inputAligned) *
                    (params.edgeRatioX * 2.0f) / targetW;
     const float centerSizeYAligned =
-        1.0f - std::ceil(edgeSizeY / (params.edgeRatioY * 2.0f)) *
+        1.0f - EdgeCells(edgeSizeY, params.edgeRatioY, inputAligned) *
                    (params.edgeRatioY * 2.0f) / targetH;
 
     const float centerShiftXAligned =
@@ -168,6 +184,33 @@ inline FoveationLayout CalculateFoveationLayout(uint32_t targetEyeWidth,
     layout.eyeHeightRatio = optimizedH / static_cast<float>(std::max(layout.optimizedEyeHeight, 1u));
     layout.parameters = params;
     return layout;
+}
+
+} // namespace detail
+
+// The layout the server encodes with, from the preset's table.
+inline FoveationLayout CalculateFoveationLayout(uint32_t targetEyeWidth,
+                                                uint32_t targetEyeHeight,
+                                                FoveationPreset preset,
+                                                uint32_t alignment = 32)
+{
+    return detail::CalculateFoveationLayout(targetEyeWidth, targetEyeHeight, preset,
+                                            ParametersForPreset(preset), alignment, false);
+}
+
+// The same layout from parameters that are already aligned: the announce's StreamConfig
+// foveationCenterSize* / CenterShift* / EdgeRatio*. A client that builds its layout from the
+// announce decodes correctly even when a server's parameters differ from the table under that
+// preset's name; preset only has to be non-Off. For the table's own parameters this gives the
+// server's layout exactly (clients/steam-frame/tests/test_foveation.cpp).
+inline FoveationLayout CalculateFoveationLayoutFromAligned(uint32_t targetEyeWidth,
+                                                           uint32_t targetEyeHeight,
+                                                           FoveationPreset preset,
+                                                           FoveationPresetParameters alignedParams,
+                                                           uint32_t alignment = 32)
+{
+    return detail::CalculateFoveationLayout(targetEyeWidth, targetEyeHeight, preset,
+                                            alignedParams, alignment, true);
 }
 
 // The receiving half of the above: reconstruct the exact layout the server warped with, from the

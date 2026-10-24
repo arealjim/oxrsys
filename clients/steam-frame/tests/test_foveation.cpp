@@ -183,4 +183,46 @@ void test_foveation()
     CHECK(protocol::QuantizeCenterShift(2.0f) == 127);   // clamped
     CHECK(protocol::DequantizeCenterShift(127) == 1.0f);
     CHECK(protocol::DequantizeCenterShift(-127) == -1.0f);
+
+    SECTION("foveation: layout from the announced (aligned) parameters equals the preset's");
+    {
+        // The client builds its layout from the announce, which carries the server's ALIGNED
+        // parameters. Re-aligning them must reproduce the server's layout exactly, at every size.
+        int compared = 0, mismatched = 0;
+        for (protocol::FoveationPreset p : {protocol::FoveationPreset::Light,
+                                            protocol::FoveationPreset::Medium,
+                                            protocol::FoveationPreset::High}) {
+            for (uint32_t w = 1024; w <= 2304; w += 16) {
+                for (uint32_t h : {1024u, 1216u, 1600u, 2160u, 2224u}) {
+                    const protocol::FoveationLayout srv = protocol::CalculateFoveationLayout(w, h, p);
+                    const protocol::FoveationLayout cli =
+                        protocol::CalculateFoveationLayoutFromAligned(w, h, p, srv.parameters);
+                    compared++;
+                    if (cli.optimizedEyeWidth != srv.optimizedEyeWidth ||
+                        cli.optimizedEyeHeight != srv.optimizedEyeHeight ||
+                        std::fabs(cli.eyeWidthRatio - srv.eyeWidthRatio) > 1e-6f ||
+                        std::fabs(cli.eyeHeightRatio - srv.eyeHeightRatio) > 1e-6f ||
+                        std::fabs(cli.parameters.centerSizeX - srv.parameters.centerSizeX) > 1e-6f ||
+                        std::fabs(cli.parameters.centerSizeY - srv.parameters.centerSizeY) > 1e-6f)
+                        mismatched++;
+                }
+            }
+        }
+        CHECK(compared > 1000);
+        CHECK(mismatched == 0);
+        if (mismatched) fprintf(stderr, "  %d of %d layouts differ\n", mismatched, compared);
+    }
+    {
+        // Parameters that differ from the table under the same preset name: the explicit
+        // overload follows them (here a wider centre gives a larger encoded eye).
+        protocol::FoveationPresetParameters wide = protocol::ParametersForPreset(protocol::FoveationPreset::Medium);
+        wide.centerSizeX += 0.1f;
+        wide.centerSizeY += 0.1f;
+        const protocol::FoveationLayout table =
+            protocol::CalculateFoveationLayout(2160, 2224, protocol::FoveationPreset::Medium);
+        const protocol::FoveationLayout ann =
+            protocol::CalculateFoveationLayoutFromAligned(2160, 2224, protocol::FoveationPreset::Medium, wide);
+        CHECK(ann.optimizedEyeWidth > table.optimizedEyeWidth);
+        CHECK(ann.optimizedEyeHeight > table.optimizedEyeHeight);
+    }
 }
