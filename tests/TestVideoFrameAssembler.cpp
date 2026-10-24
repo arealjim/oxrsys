@@ -109,6 +109,8 @@ struct Harness
     std::vector<std::vector<uint8_t>> deliveredFrames;
     std::vector<uint32_t> deliveredIndices;
     std::vector<VideoFrameAssembler::AbandonedFrame> abandoned;
+    std::vector<uint32_t> incompleteIndices;
+    std::vector<uint32_t> incompleteMissing;
     uint32_t fecRecoveries = 0;
 
     explicit Harness(bool interleaved)
@@ -124,6 +126,37 @@ struct Harness
             });
         assembler.SetOnFecRecovery(
             [this](uint32_t, uint32_t, uint32_t) { fecRecoveries++; });
+        assembler.SetOnFrameIncomplete(
+            [this](const VideoFrameAssembler::AbandonedFrame& frame) {
+                incompleteIndices.push_back(frame.frameIndex);
+                incompleteMissing.push_back(frame.totalPackets - frame.receivedPackets);
+            });
+    }
+
+    // Retransmit-wait mode with the test's clock; keyframe marks the packet VIDEO_FLAG_KEYFRAME.
+    void Data(const TestNal& nal, uint32_t packetIndex, int64_t nowUs, bool keyframe = false)
+    {
+        protocol::VideoPacketHeader header = DataHeader(nal, packetIndex);
+        if (keyframe)
+        {
+            header.flags |= protocol::VIDEO_FLAG_KEYFRAME;
+        }
+        assembler.ProcessPacket(header, nal.payloads[packetIndex].data(),
+                                nal.payloads[packetIndex].size(), nowUs);
+    }
+
+    void Parity(const TestNal& nal, uint32_t groupIndex, int64_t nowUs)
+    {
+        assembler.ProcessPacket(ParityHeader(nal, groupIndex), nal.parity[groupIndex].data(),
+                                nal.parity[groupIndex].size(), nowUs);
+    }
+
+    void All(const TestNal& nal, int64_t nowUs, bool keyframe = false)
+    {
+        for (uint32_t i = 0; i < nal.totalPackets; i++)
+        {
+            Data(nal, i, nowUs, keyframe);
+        }
     }
 
     void Data(const TestNal& nal, uint32_t packetIndex)
@@ -356,4 +389,291 @@ TEST_CASE("Duplicate data and parity packets are ignored", "[fec][assembler]")
     REQUIRE(harness.deliveredFrames.size() == 1);
     REQUIRE(harness.deliveredFrames[0] == nal.ExpectedBytes());
     REQUIRE(harness.fecRecoveries == 1);
+}
+
+// ---- Retransmit-wait mode ------------------------------------------------------------------
+// Measured on the live chain (2026-10-18): a frame missing 7-46 packets when the next frame
+// starts was abandoned at once, its NACK retransmit arrived ~5 ms later to an assembler that had
+// moved on, and a keyframe followed. These cases pin the parked-NAL path that replaces that.
+
+namespace
+{
+constexpr int64_t kWait = VideoFrameAssembler::kRecommendedRetransmitWaitUs;
+
+// A 40-packet NAL (one ~50 kB P-frame) losing an 8-packet burst: two losses in each of its four
+// interleaved FEC groups, so parity alone cannot recover any of it.
+constexpr uint32_t kBurstFirst = 10;
+constexpr uint32_t kBurstLast = 17;
+
+void SendWithBurstLoss(Harness& harness, const TestNal& nal, int64_t nowUs)
+{
+    for (uint32_t i = 0; i < nal.totalPackets; i++)
+    {
+        if (i < kBurstFirst || i > kBurstLast)
+        {
+            harness.Data(nal, i, nowUs);
+        }
+    }
+    for (uint32_t g = 0; g < nal.parity.size(); g++)
+    {
+        harness.Parity(nal, g, nowUs);
+    }
+}
+
+void Retransmit(Harness& harness, const TestNal& nal, int64_t nowUs)
+{
+    for (uint32_t i = kBurstFirst; i <= kBurstLast; i++)
+    {
+        harness.Data(nal, i, nowUs);
+    }
+}
+} // namespace
+
+TEST_CASE("A burst retransmitted within the wait delivers the parked NAL first, then the newer "
+          "frames in order",
+          "[assembler][nack]")
+{
+    Harness harness(true);
+    harness.assembler.SetRetransmitWaitUs(kWait);
+    const TestNal lossy = MakeNal(100, 40, true);
+    const TestNal next = MakeNal(101, 40, true);
+    const TestNal after = MakeNal(102, 40, true);
+
+    SendWithBurstLoss(harness, lossy, 0);
+    REQUIRE(harness.incompleteIndices.empty());
+
+    harness.All(next, 11000);
+    REQUIRE(harness.incompleteIndices == std::vector<uint32_t>{100});
+    REQUIRE(harness.incompleteMissing == std::vector<uint32_t>{kBurstLast - kBurstFirst + 1});
+    REQUIRE(harness.deliveredIndices.empty());  // 101 is complete but must wait behind 100
+
+    harness.Data(after, 0, 15000);
+    Retransmit(harness, lossy, 16000);  // 5 ms after the NACK, inside the 12 ms wait
+    REQUIRE(harness.deliveredIndices == std::vector<uint32_t>{100, 101});
+    REQUIRE(harness.deliveredFrames[0] == lossy.ExpectedBytes());
+    REQUIRE(harness.deliveredFrames[1] == next.ExpectedBytes());
+
+    for (uint32_t i = 1; i < after.totalPackets; i++)
+    {
+        harness.Data(after, i, 17000);
+    }
+    REQUIRE(harness.deliveredIndices == std::vector<uint32_t>{100, 101, 102});
+    REQUIRE(harness.abandoned.empty());
+    REQUIRE(harness.assembler.ParkedRecoveries() == 1);
+}
+
+TEST_CASE("Single-packet NALs sharing a frameIndex queue behind a parked NAL without colliding",
+          "[assembler][nack]")
+{
+    // A keyframe's VPS, SPS and PPS are each one packet under one frameIndex: same frameIndex,
+    // same totalPackets. Held behind a parked NAL they must stay three NALs.
+    Harness harness(true);
+    harness.assembler.SetRetransmitWaitUs(kWait);
+    const TestNal lossy = MakeNal(500, 40, true);
+    const TestNal vps = MakeNal(501, 1, true, 20);
+    const TestNal sps = MakeNal(501, 1, true, 30);
+    const TestNal pps = MakeNal(501, 1, true, 40);
+    const TestNal idr = MakeNal(501, 60, true);
+
+    SendWithBurstLoss(harness, lossy, 0);
+    harness.All(vps, 1000, true);
+    harness.All(sps, 1000, true);
+    harness.All(pps, 1000, true);
+    harness.All(idr, 2000, true);
+    REQUIRE(harness.deliveredIndices.empty());
+
+    Retransmit(harness, lossy, 6000);
+    REQUIRE(harness.deliveredFrames.size() == 5);
+    REQUIRE(harness.deliveredFrames[0] == lossy.ExpectedBytes());
+    REQUIRE(harness.deliveredFrames[1] == vps.ExpectedBytes());
+    REQUIRE(harness.deliveredFrames[2] == sps.ExpectedBytes());
+    REQUIRE(harness.deliveredFrames[3] == pps.ExpectedBytes());
+    REQUIRE(harness.deliveredFrames[4] == idr.ExpectedBytes());
+    REQUIRE(harness.abandoned.empty());
+}
+
+TEST_CASE("A parked NAL whose wait expires is abandoned and newer frames are dropped until a "
+          "keyframe",
+          "[assembler][nack]")
+{
+    Harness harness(true);
+    harness.assembler.SetRetransmitWaitUs(kWait);
+    const TestNal lossy = MakeNal(200, 40, true);
+    const TestNal p1 = MakeNal(201, 40, true);
+    const TestNal p2 = MakeNal(202, 40, true);
+    const TestNal p3 = MakeNal(203, 40, true);
+    const TestNal vps = MakeNal(204, 1, true, 20);
+    const TestNal idr = MakeNal(204, 60, true);
+    const TestNal p5 = MakeNal(205, 40, true);
+
+    SendWithBurstLoss(harness, lossy, 0);
+    harness.All(p1, 1000);  // 200 parked at t=1000
+    harness.All(p2, 12000);
+    REQUIRE(harness.abandoned.empty());  // 11 ms in: still waiting
+
+    harness.assembler.Poll(1000 + kWait);  // the wait is over, no packet needed
+    REQUIRE(harness.abandoned.size() == 1);
+    REQUIRE(harness.abandoned[0].frameIndex == 200);
+    REQUIRE(harness.deliveredIndices.empty());
+    REQUIRE(harness.assembler.DiscardedNals() == 2);  // 201 and 202 reference the lost NAL
+
+    // The retransmit that missed the deadline must not restart assembly or abandon anything.
+    Retransmit(harness, lossy, 14000);
+    harness.All(p3, 15000);
+    REQUIRE(harness.deliveredIndices.empty());
+    REQUIRE(harness.abandoned.size() == 1);
+    REQUIRE(harness.incompleteIndices == std::vector<uint32_t>{200});
+    REQUIRE(harness.assembler.LateRetransmits() == kBurstLast - kBurstFirst + 1);
+
+    harness.All(vps, 20000, true);
+    harness.All(idr, 20000, true);
+    harness.All(p5, 30000);
+    REQUIRE(harness.deliveredIndices == std::vector<uint32_t>{204, 204, 205});
+    REQUIRE(harness.deliveredFrames[0] == vps.ExpectedBytes());
+    REQUIRE(harness.deliveredFrames[1] == idr.ExpectedBytes());
+    REQUIRE(harness.deliveredFrames[2] == p5.ExpectedBytes());
+}
+
+TEST_CASE("A third newer frame abandons the parked NAL before the wait expires",
+          "[assembler][nack]")
+{
+    for (const bool discard : {true, false})
+    {
+        Harness harness(true);
+        harness.assembler.SetRetransmitWaitUs(kWait);
+        harness.assembler.SetDiscardUntilKeyframe(discard);
+        const TestNal lossy = MakeNal(300, 40, true);
+        const TestNal p1 = MakeNal(301, 30, true);
+        const TestNal p2 = MakeNal(302, 30, true);
+        const TestNal p3 = MakeNal(303, 30, true);
+
+        SendWithBurstLoss(harness, lossy, 0);
+        harness.All(p1, 100);
+        harness.All(p2, 200);
+        REQUIRE(harness.abandoned.empty());
+        harness.Data(p3, 0, 300);  // 3 newer frames > the 2 that may be buffered
+        REQUIRE(harness.abandoned.size() == 1);
+        REQUIRE(harness.abandoned[0].frameIndex == 300);
+        for (uint32_t i = 1; i < p3.totalPackets; i++)
+        {
+            harness.Data(p3, i, 400);
+        }
+        if (discard)
+        {
+            REQUIRE(harness.deliveredIndices.empty());
+        }
+        else
+        {
+            REQUIRE(harness.deliveredIndices == std::vector<uint32_t>{301, 302, 303});
+            REQUIRE(harness.deliveredFrames[2] == p3.ExpectedBytes());
+        }
+    }
+}
+
+TEST_CASE("A wait of 0 is the original path: abandon at once, deliver the next, no park",
+          "[assembler][nack]")
+{
+    for (const bool explicitZero : {false, true})
+    {
+        Harness harness(true);
+        if (explicitZero)
+        {
+            harness.assembler.SetRetransmitWaitUs(kWait);
+            harness.assembler.SetRetransmitWaitUs(0);
+        }
+        REQUIRE(harness.assembler.RetransmitWaitUs() == 0);
+        const TestNal lossy = MakeNal(100, 40, true);
+        const TestNal next = MakeNal(101, 40, true);
+
+        SendWithBurstLoss(harness, lossy, 0);
+        harness.Data(next, 0, 11000);
+        REQUIRE(harness.abandoned.size() == 1);
+        REQUIRE(harness.abandoned[0].frameIndex == 100);
+        REQUIRE(harness.abandoned[0].receivedPackets == 40 - (kBurstLast - kBurstFirst + 1));
+        REQUIRE(harness.incompleteIndices.empty());
+        for (uint32_t i = 1; i < next.totalPackets; i++)
+        {
+            harness.Data(next, i, 11000);
+        }
+        REQUIRE(harness.deliveredIndices == std::vector<uint32_t>{101});
+        harness.assembler.Poll(1000000);  // no-op at wait 0
+        REQUIRE(harness.abandoned.size() == 1);
+    }
+}
+
+TEST_CASE("FEC still recovers in retransmit-wait mode without parking", "[assembler][nack][fec]")
+{
+    Harness harness(true);
+    harness.assembler.SetRetransmitWaitUs(kWait);
+    const TestNal nal = MakeNal(600, 40, true);
+    const fec::GroupLayout layout{nal.totalPackets, true};
+    const uint32_t groupCount = layout.Count();
+    // One loss per group: exactly what the parity covers.
+    for (uint32_t i = 0; i < nal.totalPackets; i++)
+    {
+        if (i >= 20 && i < 20 + groupCount)
+        {
+            continue;
+        }
+        harness.Data(nal, i, 0);
+    }
+    for (uint32_t g = 0; g < groupCount; g++)
+    {
+        harness.Parity(nal, g, 0);
+    }
+    REQUIRE(harness.deliveredIndices == std::vector<uint32_t>{600});
+    REQUIRE(harness.deliveredFrames[0] == nal.ExpectedBytes());
+    REQUIRE(harness.fecRecoveries == groupCount);
+
+    const TestNal next = MakeNal(601, 10, true);
+    harness.All(next, 1000);
+    REQUIRE(harness.deliveredIndices == std::vector<uint32_t>{600, 601});
+    REQUIRE(harness.incompleteIndices.empty());
+    REQUIRE(harness.abandoned.empty());
+}
+
+TEST_CASE("Parity for a parked NAL arriving late still recovers it; its retransmit is then "
+          "ignored",
+          "[assembler][nack][fec]")
+{
+    Harness harness(true);
+    harness.assembler.SetRetransmitWaitUs(kWait);
+    const TestNal lossy = MakeNal(400, 40, true);
+    const TestNal next = MakeNal(401, 40, true);
+    const fec::GroupLayout layout{lossy.totalPackets, true};
+    const uint32_t lostIndex = 5;
+    const uint32_t lostGroup = layout.GroupOf(lostIndex);
+
+    for (uint32_t i = 0; i < lossy.totalPackets; i++)
+    {
+        if (i != lostIndex)
+        {
+            harness.Data(lossy, i, 0);
+        }
+    }
+    for (uint32_t g = 0; g < layout.Count(); g++)
+    {
+        if (g != lostGroup)
+        {
+            harness.Parity(lossy, g, 0);
+        }
+    }
+    harness.All(next, 1000);  // parks 400 (its parity is still in flight) and NACKs it
+    REQUIRE(harness.incompleteIndices == std::vector<uint32_t>{400});
+    REQUIRE(harness.incompleteMissing == std::vector<uint32_t>{1});
+    REQUIRE(harness.deliveredIndices.empty());
+
+    harness.Parity(lossy, lostGroup, 2000);
+    REQUIRE(harness.deliveredIndices == std::vector<uint32_t>{400, 401});
+    REQUIRE(harness.deliveredFrames[0] == lossy.ExpectedBytes());
+    REQUIRE(harness.assembler.ParkedRecoveries() == 1);
+
+    // The NACKed packet now arrives: settled, so it must not start a phantom NAL.
+    harness.Data(lossy, lostIndex, 6000);
+    const TestNal after = MakeNal(402, 10, true);
+    harness.All(after, 11000);
+    REQUIRE(harness.deliveredIndices == std::vector<uint32_t>{400, 401, 402});
+    REQUIRE(harness.abandoned.empty());
+    REQUIRE(harness.incompleteIndices.size() == 1);
+    REQUIRE(harness.assembler.LateRetransmits() == 1);
 }
