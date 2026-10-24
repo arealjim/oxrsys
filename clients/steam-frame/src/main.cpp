@@ -1105,14 +1105,17 @@ static void RenderFrame(App& app)
             // Only present once we have real content (a texture).
             auto compositorT0 = std::chrono::steady_clock::now();
             if (app.videoImage != VK_NULL_HANDLE && app.descriptorWritten) {
+                // A failed acquire or wait leaves that eye neither rendered into nor released,
+                // and no layer goes out this frame (it would carry an uninitialised view).
+                bool eyesOk = true;
                 for (uint32_t eye = 0; eye < VIEW_COUNT; eye++) {
                     Swapchain& sc = app.swapchains[eye];
                     XrSwapchainImageAcquireInfo ai = {XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
                     uint32_t idx = 0;
-                    if (XR_FAILED(xrAcquireSwapchainImage(sc.handle, &ai, &idx))) break;
+                    if (XR_FAILED(xrAcquireSwapchainImage(sc.handle, &ai, &idx))) { eyesOk = false; break; }
                     XrSwapchainImageWaitInfo wii = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
                     wii.timeout = XR_INFINITE_DURATION;
-                    xrWaitSwapchainImage(sc.handle, &wii);
+                    if (XR_FAILED(xrWaitSwapchainImage(sc.handle, &wii))) { eyesOk = false; break; }
 
                     RenderEye(app, eye, idx);
                     if (eye == 0) DumpSwapchainImage(app, sc, idx);
@@ -1130,7 +1133,7 @@ static void RenderFrame(App& app)
                 layer.space = app.stageSpace;
                 layer.viewCount = VIEW_COUNT;
                 layer.views = projViews.data();
-                submitLayer = true;
+                submitLayer = eyesOk;
 
                 // Feed oxrsys's adaptive bitrate: report client latencies ~1/s.
                 if (g_streamMode) {
