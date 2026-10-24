@@ -203,6 +203,21 @@ void StreamConnection::SendLatencyReport(float decodeMs, float compositorMs, flo
     send(controlSocket_, &r, sizeof(r), 0);
 }
 
+bool StreamConnection::TakeNetworkNeedKeyframe()
+{
+    return connected_ && net_ && net_->TakeNeedKeyframe();
+}
+
+bool StreamConnection::NetworkAwaitingKeyframe() const
+{
+    return connected_ && net_ && net_->AwaitingKeyframe();
+}
+
+uint32_t StreamConnection::FramesDropped() const
+{
+    return net_ ? net_->GetFramesDropped() : 0;
+}
+
 void StreamConnection::SendKeyframeRequest(uint32_t reasonFlags, uint32_t detail)
 {
     if (!connected_ || controlSocket_ < 0) return;

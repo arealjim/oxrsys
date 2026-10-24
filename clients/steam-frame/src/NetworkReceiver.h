@@ -67,6 +67,13 @@ public:
     uint32_t GetFramesDelivered() const { return framesDelivered_.load(); }
     uint32_t GetFramesDropped() const { return framesDropped_.load(); }
     uint32_t GetFecRecoveries() const { return fecRecoveries_.load(); }
+    // True once after a frame was abandoned (its retransmit wait ran out): request an IDR so
+    // the GOP does not stay corrupted until the next scheduled keyframe.
+    bool TakeNeedKeyframe() { return needKeyframe_.exchange(false); }
+    // True from an abandonment until a keyframe's picture NAL is delivered: the assembler is
+    // discarding, so nothing new reaches the screen. A keyframe lost whole raises no second
+    // abandonment, so the caller keeps asking while this holds.
+    bool AwaitingKeyframe() const { return awaitingKeyframe_.load(); }
 
     // Render pose from the server (set when VIDEO_FLAG_RENDER_POSE packets arrive)
     struct RenderPose
@@ -127,6 +134,8 @@ private:
     std::atomic<uint32_t> framesDropped_{0};
     std::atomic<uint32_t> fecRecoveries_{0};
     std::atomic<uint32_t> nacksSent_{0};
+    std::atomic<bool> needKeyframe_{false};
+    std::atomic<bool> awaitingKeyframe_{false};
     std::atomic<int64_t> lastCompletedFrameReceiveTimeNs_{0};
 
     // Latest render pose from server

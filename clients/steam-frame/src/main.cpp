@@ -951,6 +951,34 @@ static void PollEvents(App& app)
     }
 }
 
+// On a decode error or a lost frame, ask for a keyframe, at most once per 120 ms (NACK round
+// trip ~5 ms + encode ~12 ms + send, with margin, so a healthy IDR lands before the next ask).
+// A need that meets the limit stays pending instead of being dropped, and while the receiver
+// discards until a keyframe we ask again each interval: a damaged or wholly lost IDR otherwise
+// leaves the screen frozen until the periodic one, 1-2 s.
+static void RequestKeyframeIfNeeded()
+{
+    static bool pendingDecoderKeyframe = false;
+    static bool pendingNetworkKeyframe = false;
+    pendingDecoderKeyframe |= g_decoder.TakeNeedKeyframe();
+    pendingNetworkKeyframe |= g_stream.TakeNetworkNeedKeyframe();
+    const bool awaitingKeyframe = g_stream.NetworkAwaitingKeyframe();
+    if (!pendingDecoderKeyframe && !pendingNetworkKeyframe && !awaitingKeyframe) return;
+    static auto lastReq = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - lastReq < std::chrono::milliseconds(120)) return;
+    const bool network = pendingNetworkKeyframe || awaitingKeyframe;
+    g_stream.SendKeyframeRequest(network ? oxr::protocol::KEYFRAME_REASON_FRAME_LOSS
+                                         : oxr::protocol::KEYFRAME_REASON_DECODE_STALL,
+                                 network ? g_stream.FramesDropped() : 0);
+    lastReq = now;
+    LOG_INFO("%s — requested keyframe", pendingNetworkKeyframe ? "frame lost"
+                                        : awaitingKeyframe ? "still discarding"
+                                        : "decode error");
+    pendingDecoderKeyframe = false;
+    pendingNetworkKeyframe = false;
+}
+
 static void RenderFrame(App& app)
 {
     XrFrameWaitInfo wi = {XR_TYPE_FRAME_WAIT_INFO};
@@ -1019,18 +1047,7 @@ static void RenderFrame(App& app)
                 g_xrInput.Update(fs.predictedDisplayTime, pkt);
                 g_stream.SendTrackingPacket(pkt);
 
-                // On a decode error (lost reference frame), ask for a keyframe —
-                // rate-limited to at most ~2/s so an error burst doesn't flood
-                // the server before the fresh IDR arrives.
-                if (g_decoder.TakeNeedKeyframe()) {
-                    static auto lastReq = std::chrono::steady_clock::time_point{};
-                    auto now = std::chrono::steady_clock::now();
-                    if (now - lastReq >= std::chrono::milliseconds(500)) {
-                        g_stream.SendKeyframeRequest(oxr::protocol::KEYFRAME_REASON_DECODE_STALL, 0);
-                        lastReq = now;
-                        LOG_INFO("decode error — requested keyframe");
-                    }
-                }
+                RequestKeyframeIfNeeded();
 
                 static int ic = 0;
                 if (ic++ % 120 == 0) {

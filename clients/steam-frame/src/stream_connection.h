@@ -49,6 +49,11 @@ public:
 
     // Ask the server for a keyframe (IDR) to resync after a decode error / loss.
     void SendKeyframeRequest(uint32_t reasonFlags, uint32_t detail);
+    // True once after the receiver abandoned a frame (lost packets); request an IDR.
+    bool TakeNetworkNeedKeyframe();
+    // True while the receiver discards until a keyframe; keep asking.
+    bool NetworkAwaitingKeyframe() const;
+    uint32_t FramesDropped() const;
 
     bool Connected() const { return connected_; }
     const std::string& ServerIp() const { return serverIp_; }

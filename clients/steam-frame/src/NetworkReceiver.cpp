@@ -197,12 +197,31 @@ bool NetworkReceiver::StartReceiving(const char* serverIp, uint16_t videoPort,
     return true;
 }
 
+// A keyframe is VPS/SPS/PPS NALs then the IDR slice, all flagged VIDEO_FLAG_KEYFRAME; only the
+// slice ends the wait for one (its parameter sets can arrive while the slice itself is lost).
+// AV1 and anything unparsable count as a picture.
+static bool IsPictureNal(const uint8_t* data, size_t size, uint8_t codec)
+{
+    size_t i = 0;
+    while (i + 3 < size && data[i] == 0) i++;
+    if (i < 2 || i + 1 >= size || data[i] != 1) return true;
+    const uint8_t b = data[i + 1];
+    if (codec == static_cast<uint8_t>(protocol::VideoCodec::H265)) return ((b >> 1) & 0x3f) < 32;
+    if (codec == static_cast<uint8_t>(protocol::VideoCodec::H264)) { const int t = b & 0x1f; return t >= 1 && t <= 5; }
+    return true;
+}
+
 void NetworkReceiver::WireAssemblerCallbacks()
 {
     assembler_.SetOnFrame([this](const streaming::VideoFrameAssembler::Frame& frame) {
         uint32_t delivered = framesDelivered_.fetch_add(1) + 1;
         int64_t receiveTimeNs = SteadyClockNowNs();
         lastCompletedFrameReceiveTimeNs_.store(receiveTimeNs);
+        if ((frame.flags & protocol::VIDEO_FLAG_KEYFRAME) && IsPictureNal(frame.data, frame.size, frame.codec) &&
+            awaitingKeyframe_.exchange(false))
+        {
+            LOGI("Frame %u: keyframe delivered, discard over", frame.frameIndex);
+        }
         if (delivered <= 5 || delivered % 300 == 0)
         {
             LOGI("Frame %u complete: %u packets, %zu bytes total",
@@ -230,6 +249,9 @@ void NetworkReceiver::WireAssemblerCallbacks()
         });
     assembler_.SetOnFrameAbandoned(
         [this](const streaming::VideoFrameAssembler::AbandonedFrame& frame) {
+            // The retransmit wait ran out (or too many newer frames arrived): keyframe.
+            needKeyframe_.store(true);
+            awaitingKeyframe_.store(true);
             uint32_t dropped = framesDropped_.fetch_add(1) + 1;
             if (dropped <= 5 || dropped % 100 == 0)
             {
