@@ -55,6 +55,8 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Changed
 
+- A frame dropped before encode is now logged on the first drop and every 450th after it, with the
+  count so far, instead of only once per encoder. A stream that drops every frame keeps saying so.
 - The in-process VideoToolbox session now requires the hardware encoder when VideoToolbox reports
   one for the negotiated codec, retrying without the requirement only if that create fails, and the
   runtime log states whether the session it got is hardware or software.
