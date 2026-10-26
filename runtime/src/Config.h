@@ -24,6 +24,14 @@ struct ConfigValues
     std::string videoCodec = "h265"; // "h265", "h264", "auto"
     std::string encoderPreset = "balanced"; // "quality", "balanced", "speed"
     bool encoder10Bit = false;      // Encode HEVC Main10 for capable H.265 clients
+    // send_pacing_ms: spread each encoded frame's UDP packets evenly over this many ms instead
+    // of handing them to the socket as one burst (an AP queue under contention drops a burst's
+    // tail, and the XOR FEC cannot repair consecutive losses). Capped at 0.8 of the frame period;
+    // the rest of a frame goes at once if a newer frame is waiting. 0 = burst (the old behaviour).
+    float sendPacingMs = 0.0f;
+    // send_pacing_keyframe_ms: the window for frames that carry a keyframe (up to ~300 kB).
+    // 0 = twice send_pacing_ms. Same cap.
+    float sendPacingKeyframeMs = 0.0f;
 
     // Out-of-process native-arm64 hardware encoder helper. When the runtime
     // dylib is loaded by an x86_64/Rosetta host it cannot reach VideoToolbox's

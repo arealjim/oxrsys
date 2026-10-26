@@ -1471,6 +1471,9 @@ void StreamingServer::EncodeThread()
                     const uint32_t videoSendDepthMax = server->videoSendQueueDepthMax_.exchange(0);
                     const uint32_t videoSendDrops = server->videoSendDroppedFrames_.exchange(0);
                     const uint32_t videoTcpFailures = server->videoTcpSendFailures_.exchange(0);
+                    const uint32_t pacedFlushes = server->videoPacedFlushes_.exchange(0);
+                    const uint32_t udpSendFailures = server->videoUdpSendFailures_.exchange(0);
+                    const uint32_t pacingLateUs = server->videoPacingMaxLatenessUs_.exchange(0);
                     const uint32_t udpRetransmits =
                         server->videoUdpRetransmittedPackets_.exchange(0);
                     std::string abrModeName;
@@ -1588,7 +1591,8 @@ void StreamingServer::EncodeThread()
                         "StreamingServer: encode queue(avg/p95={:.2f}/{:.2f}ms) gpu({:.2f}/{:.2f}) "
                         "submit({:.3f}/{:.3f}) callback({:.2f}/{:.2f}) total({:.2f}/{:.2f}) "
                         "replaced={} encDrops={} keyframeReq={} depthMax={} sendDepth={} sendDrops={} "
-                        "tcpFail={} udpRetrans={} abr={}/{} profile={} displayedAge={:.2f}ms reproj={} stale={} poseFallbacks={}",
+                        "tcpFail={} udpRetrans={} abr={}/{} profile={} displayedAge={:.2f}ms reproj={} stale={} poseFallbacks={} "
+                        "pacing={:.1f}/{:.1f}ms pacedFlush={} udpSendFail={} pacingLateMax={}us",
                         queueSummary.average, queueSummary.p95,
                         gpuSummary.average, gpuSummary.p95,
                         submitSummary.average, submitSummary.p95,
@@ -1608,7 +1612,10 @@ void StreamingServer::EncodeThread()
                         server->clientDisplayedFrameAgeMs_.load(),
                         server->clientReprojectedFramesDelta_.load(),
                         server->clientStaleFrameReusesDelta_.load(),
-                        server->clientRenderPoseFallbacksDelta_.load());
+                        server->clientRenderPoseFallbacksDelta_.load(),
+                        server->videoPacingWindowMsForLog_.load(),
+                        server->videoPacingKeyframeWindowMsForLog_.load(),
+                        pacedFlushes, udpSendFailures, pacingLateUs);
 
                     telemetry->lastLogTime = now;
                 }
@@ -2801,6 +2808,7 @@ void StreamingServer::QueueEncodedVideoFrame(EncodedVideoFrame frame)
             videoSendDroppedFramesTotalForAbr_.fetch_add(1);
         }
         videoSendQueue_.push_back(std::move(frame));
+        videoSendNewerFrameQueued_.store(true);
         videoSendQueueDepthMax_.store(std::max(
             videoSendQueueDepthMax_.load(),
             static_cast<uint32_t>(videoSendQueue_.size())));
@@ -2812,6 +2820,7 @@ void StreamingServer::ClearVideoSendQueue()
 {
     std::lock_guard<std::mutex> lock(videoSendMutex_);
     videoSendQueue_.clear();
+    videoSendNewerFrameQueued_.store(false);
 }
 
 void StreamingServer::VideoSendThread()
@@ -2841,6 +2850,7 @@ void StreamingServer::VideoSendThread()
             videoSendQueue_.pop_front();
 
             const bool newerFrameQueued = !videoSendQueue_.empty();
+            videoSendNewerFrameQueued_.store(newerFrameQueued);
             const bool hasKeyframeNal = std::any_of(
                 frame.nals.begin(), frame.nals.end(),
                 [](const EncodedNalUnit& nal) { return nal.isKeyframe; });
@@ -2868,6 +2878,40 @@ void StreamingServer::SendEncodedVideoFrame(const EncodedVideoFrame& frame)
         SendRenderPosePacket(frame);
     }
 
+    // Packet pacing: the frame's datagrams (data + FEC parity, over all its NALs)
+    // spread evenly over send_pacing_ms. Config is re-read about once a second so
+    // a toml reload takes effect without a restart.
+    if (videoPacingConfigAge_++ % 90 == 0)
+    {
+        const ConfigValues config = Config::Get().GetValues();
+        videoPacingConfig_.windowMs = config.sendPacingMs;
+        videoPacingConfig_.keyframeWindowMs = config.sendPacingKeyframeMs;
+        videoPacingWindowMsForLog_.store(config.sendPacingMs);
+        videoPacingKeyframeWindowMsForLog_.store(config.sendPacingKeyframeMs);
+    }
+    bool frameHasKeyframe = false;
+    uint32_t frameDatagrams = 0;
+    for (const EncodedNalUnit& nal : frame.nals)
+    {
+        if (nal.tcpPayload.size() <= sizeof(oxr::protocol::TcpVideoNalHeader))
+        {
+            continue;
+        }
+        const auto* nalHeader =
+            reinterpret_cast<const oxr::protocol::TcpVideoNalHeader*>(nal.tcpPayload.data());
+        const size_t nalSize = std::min<size_t>(
+            nalHeader->payloadSize,
+            nal.tcpPayload.size() - sizeof(oxr::protocol::TcpVideoNalHeader));
+        frameDatagrams += oxrsys::streaming::DatagramsForNal(
+            nalSize, oxr::protocol::MAX_PACKET_PAYLOAD, oxr::protocol::FEC_GROUP_SIZE);
+        frameHasKeyframe = frameHasKeyframe || nal.isKeyframe;
+    }
+    oxrsys::streaming::PacketPacer pacer(
+        oxrsys::streaming::PacingNowNs(),
+        oxrsys::streaming::PacingWindowNs(
+            videoPacingConfig_, frameHasKeyframe, targetRefreshRateHz_.load()),
+        frameDatagrams);
+
     for (const EncodedNalUnit& nal : frame.nals)
     {
         if (nal.tcpPayload.size() <= sizeof(oxr::protocol::TcpVideoNalHeader))
@@ -2883,7 +2927,39 @@ void StreamingServer::SendEncodedVideoFrame(const EncodedVideoFrame& frame)
             nalHeader->payloadSize,
             nal.tcpPayload.size() - sizeof(oxr::protocol::TcpVideoNalHeader));
         SendNalUnit(packetDispatchState_, frame.frameIndex, nalData, nalSize,
-                    nal.isKeyframe, frame.alphaBlend, frame.timestampNs, frame.codec);
+                    nal.isKeyframe, frame.alphaBlend, frame.timestampNs, frame.codec, &pacer);
+    }
+
+    if (pacer.Flushed())
+    {
+        videoPacedFlushes_.fetch_add(1);
+    }
+    const uint32_t latenessUs = static_cast<uint32_t>(pacer.MaxLatenessNs() / 1000);
+    if (latenessUs > videoPacingMaxLatenessUs_.load())
+    {
+        videoPacingMaxLatenessUs_.store(latenessUs);
+    }
+}
+
+void StreamingServer::SendPacedVideoDatagram(SocketHandle socket, const uint8_t* data, size_t size,
+                                             const sockaddr_in& destAddr,
+                                             oxrsys::streaming::PacketPacer* pacer)
+{
+    if (pacer)
+    {
+        // Also flush when the server is stopping, so the pacer never keeps spinning on a frame
+        // while Stop waits to join this thread.
+        pacer->WaitForNextPacket(
+            [this] { return videoSendNewerFrameQueued_.load() || !running_.load(); });
+    }
+    if (oxrsys::runtime_socket::SendTo(socket,
+                                       data,
+                                       size,
+                                       kBestEffortSendFlags,
+                                       (const sockaddr*)&destAddr,
+                                       sizeof(destAddr)) < 0)
+    {
+        videoUdpSendFailures_.fetch_add(1);
     }
 }
 
@@ -2958,7 +3034,8 @@ void StreamingServer::SendRenderPosePacket(const EncodedVideoFrame& frame)
 void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& dispatchState,
                                   uint32_t frameIndex, const uint8_t* data, size_t size,
                                   bool isKeyframe, bool alphaBlend, int64_t timestampNs,
-                                  oxr::protocol::VideoCodec codec)
+                                  oxr::protocol::VideoCodec codec,
+                                  oxrsys::streaming::PacketPacer* pacer)
 {
     std::string clientIp;
     SocketHandle videoSocket = oxrsys::runtime_socket::InvalidSocket;
@@ -3087,12 +3164,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         size_t packetSize = sizeof(header) + payloadSize;
         memcpy(packetBuffer, &header, sizeof(header));
         memcpy(packetBuffer + sizeof(header), data + offset, payloadSize);
-        oxrsys::runtime_socket::SendTo(videoSocket,
-                                       packetBuffer,
-                                       packetSize,
-                                       kBestEffortSendFlags,
-                                       (sockaddr*)&destAddr,
-                                       sizeof(destAddr));
+        SendPacedVideoDatagram(videoSocket, packetBuffer, packetSize, destAddr, pacer);
 
         // Cache for NACK retransmission. The frame is advertised to NACK only
         // once all packets have been copied.
@@ -3144,13 +3216,11 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
 
             memcpy(packetBuffer, &fecHeader, sizeof(fecHeader));
             memcpy(packetBuffer + sizeof(fecHeader), fecPayload, oxr::protocol::MAX_PACKET_PAYLOAD);
-            oxrsys::runtime_socket::SendTo(
-                videoSocket,
-                packetBuffer,
-                sizeof(fecHeader) + oxr::protocol::MAX_PACKET_PAYLOAD,
-                kBestEffortSendFlags,
-                (sockaddr*)&destAddr,
-                sizeof(destAddr));
+            SendPacedVideoDatagram(videoSocket,
+                                   packetBuffer,
+                                   sizeof(fecHeader) + oxr::protocol::MAX_PACKET_PAYLOAD,
+                                   destAddr,
+                                   pacer);
         }
     }
 

@@ -15,6 +15,7 @@
 #include <thread>
 #include <vector>
 
+#include "PacketPacer.h"
 #include "RuntimeSockets.h"
 #include "GraphicsTypes.h"
 #include "StreamingAbr.h"
@@ -298,6 +299,16 @@ private:
     std::atomic<uint32_t> videoSendDroppedFramesTotalForAbr_{0};
     std::atomic<uint32_t> videoTcpSendFailures_{0};
     std::atomic<uint32_t> videoUdpRetransmittedPackets_{0};
+    // Packet pacing (send_pacing_ms): true while a frame newer than the one being
+    // sent is queued, so the pacer sends the rest of the current frame at once.
+    std::atomic<bool> videoSendNewerFrameQueued_{false};
+    std::atomic<uint32_t> videoPacedFlushes_{0};
+    std::atomic<uint32_t> videoUdpSendFailures_{0};
+    std::atomic<uint32_t> videoPacingMaxLatenessUs_{0};
+    oxrsys::streaming::PacketPacingConfig videoPacingConfig_; // video send thread only
+    std::atomic<float> videoPacingWindowMsForLog_{0.0f};
+    std::atomic<float> videoPacingKeyframeWindowMsForLog_{0.0f};
+    uint32_t videoPacingConfigAge_ = 0;
     std::mutex videoSendMutex_;
     std::condition_variable videoSendCv_;
     std::deque<EncodedVideoFrame> videoSendQueue_;
@@ -307,7 +318,13 @@ private:
     void SendNalUnit(const std::shared_ptr<PacketDispatchState>& dispatchState,
                      uint32_t frameIndex, const uint8_t* data, size_t size,
                      bool isKeyframe, bool alphaBlend, int64_t timestampNs,
-                     oxr::protocol::VideoCodec codec);
+                     oxr::protocol::VideoCodec codec,
+                     oxrsys::streaming::PacketPacer* pacer = nullptr);
+    // Sends one UDP datagram of the video stream after the pacer says it is due,
+    // and counts a failed send (EAGAIN/ENOBUFS drops the packet before the radio).
+    void SendPacedVideoDatagram(SocketHandle socket, const uint8_t* data, size_t size,
+                                const sockaddr_in& destAddr,
+                                oxrsys::streaming::PacketPacer* pacer);
     static bool SendTcpRecord(SocketHandle socket, oxr::protocol::TcpRecordType type,
                               const void* payload, size_t payloadSize);
     static bool SendTcpRecordParts(SocketHandle socket, oxr::protocol::TcpRecordType type,

@@ -399,6 +399,14 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
             {
                 values.encoder10Bit = ParseBool(value);
             }
+            else if (key == "send_pacing_ms")
+            {
+                values.sendPacingMs = std::max(0.0f, std::min(10.0f, std::stof(value)));
+            }
+            else if (key == "send_pacing_keyframe_ms")
+            {
+                values.sendPacingKeyframeMs = std::max(0.0f, std::min(20.0f, std::stof(value)));
+            }
             else if (key == "encoder_helper")
             {
                 // Tri-state: "auto" (decide from the measured hardware-encoder
