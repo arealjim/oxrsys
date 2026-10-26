@@ -80,6 +80,13 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed the video encoder freezing for good after 64 frames dropped before encode. The runtime is
+  built without ARC and the encode thread had no autorelease pool, so each frame's autoreleased
+  Metal command buffer lived until the thread exited. A frame dropped after its command buffer was
+  made (an invalid foveated source size or format, a crop failure, an encoder that would not
+  create) left one that was never committed, and once 64 were outstanding the next
+  [queue commandBuffer] blocked the encode thread forever. Encode and EncodeStereo now drain a pool
+  per frame.
 - Fixed foveated encoding dropping every frame when an app renders its eye textures at a size
   other than the target eye size (for example The Lab at 1600x1777 for a 1512x1680 Quest 3 eye).
   The foveation kernel samples in normalized coordinates, so a source eye is now accepted when its
