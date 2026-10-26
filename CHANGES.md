@@ -80,6 +80,10 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed the `adb` children the runtime forks (the Quest logcat clear and capture) running the parent's signal
+  handlers if a signal arrived between `fork()` and `exec()`. In a multithreaded process the child is not safe to run
+  arbitrary code in that window; `ctest` left crash reports from orphaned `oxrsys_runtime_tests` children behind. The
+  fork now happens with every signal blocked, and the child resets each caught signal to its default before unblocking.
 - Fixed foveated encoding dropping every frame when an app renders its eye textures at a size
   other than the target eye size (for example The Lab at 1600x1777 for a 1512x1680 Quest 3 eye).
   The foveation kernel samples in normalized coordinates, so a source eye is now accepted when its
