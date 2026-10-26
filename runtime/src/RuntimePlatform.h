@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 
@@ -25,5 +26,11 @@ uint64_t ProcessId();
 // work is not delayed behind default-priority threads. Best effort on every
 // macOS: failures just keep the default policy.
 void SetCurrentThreadTimeSensitive();
+
+// Give the calling thread a Mach time-constraint (realtime) policy for work that repeats every
+// period: computation = a third of the period, constraint = half of it, preemptible. A thread that
+// overruns its declared computation is demoted by the scheduler, not stalled. Returns false if the
+// kernel refused the policy (the thread keeps its old one).
+bool SetCurrentThreadRealtime(std::chrono::nanoseconds period);
 
 } // namespace oxrsys::runtime_platform

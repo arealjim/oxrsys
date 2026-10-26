@@ -6,6 +6,9 @@
 #include <filesystem>
 
 #include <dlfcn.h>
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/thread_policy.h>
 #include <pthread/qos.h>
 #include <unistd.h>
 
@@ -81,6 +84,27 @@ uint64_t ProcessId()
 void SetCurrentThreadTimeSensitive()
 {
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+}
+
+bool SetCurrentThreadRealtime(std::chrono::nanoseconds period)
+{
+    mach_timebase_info_data_t timebase{};
+    mach_timebase_info(&timebase);
+    const auto toTicks = [&](long long ns)
+    { return static_cast<uint32_t>(ns * timebase.denom / timebase.numer); };
+
+    thread_time_constraint_policy_data_t policy{};
+    policy.period = toTicks(period.count());
+    policy.computation = toTicks(period.count() / 3);
+    policy.constraint = toTicks(period.count() / 2);
+    policy.preemptible = 1;
+
+    const thread_port_t self = mach_thread_self();
+    const kern_return_t result = thread_policy_set(self, THREAD_TIME_CONSTRAINT_POLICY,
+                                                   reinterpret_cast<thread_policy_t>(&policy),
+                                                   THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+    mach_port_deallocate(mach_task_self(), self);
+    return result == KERN_SUCCESS;
 }
 
 } // namespace oxrsys::runtime_platform

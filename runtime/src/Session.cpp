@@ -9,6 +9,7 @@
 #include "SwapchainCreateValidation.h"
 #include "Space.h"
 #include "InputManager.h"
+#include "RuntimePlatform.h"
 #include "StreamingServer.h"
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -426,6 +427,27 @@ void Session::GetDebugUtilsLabels(std::vector<XrDebugUtilsLabelEXT>& labels, std
     }
 }
 
+// pacing_thread = "realtime": the sleep_until below runs on the app's render thread, and at default
+// priority macOS lets that wake land up to several ms after the deadline, which shows up as
+// frame-interval jitter. The policy belongs to the calling thread, so it is applied once per thread
+// rather than once per session.
+static void ApplyPacingThreadPolicy(std::chrono::nanoseconds framePeriod)
+{
+    thread_local bool applied = false;
+    if (applied)
+    {
+        return;
+    }
+    applied = true;
+    if (Config::Get().GetValues().pacingThread != "realtime")
+    {
+        return;
+    }
+    const bool ok = oxrsys::runtime_platform::SetCurrentThreadRealtime(framePeriod);
+    spdlog::info("OXRSys: Session::WaitFrame pacing_thread=realtime period={}us applied={}",
+                 framePeriod.count() / 1000, ok);
+}
+
 XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* frameState)
 {
     if (frameWaitInfo != nullptr && frameWaitInfo->type != XR_TYPE_FRAME_WAIT_INFO)
@@ -469,6 +491,7 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
     // absorbed by the next and the cadence locks to the panel period with low
     // variance. targetFrameTime comes from the client-reported (negotiated) refresh.
     auto targetFrameTime = std::chrono::nanoseconds(1000000000ll / targetRefreshHz);
+    ApplyPacingThreadPolicy(targetFrameTime);
     auto now = std::chrono::steady_clock::now();
 
     if (nextFrameDeadline_.time_since_epoch().count() == 0 || pacingPeriod_ != targetFrameTime)
