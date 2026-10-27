@@ -17,6 +17,7 @@
 #include "GraphicsTypes.h"
 #include "BoundedDrain.h"
 #include "EncoderPathPolicy.h"
+#include "SnapshotWaitPolicy.h"
 #include <Protocol.h>
 
 // Runtime-side client for the out-of-process native-arm64 hardware HEVC
@@ -251,6 +252,13 @@ private:
     uint32_t frameCount_ = 0;
     std::atomic<bool> forceKeyframe_{false};
     std::atomic<bool> shuttingDown_{false};
+    // The snapshot wait's mode (short while frames arrive on time, long after a few late ones in a row); touched only
+    // by the encoder worker in EncodeInternal, reset in Initialize.
+    oxrsys::SnapshotWaitSettings snapshotWaitSettings_{};
+    oxrsys::SnapshotWaitState snapshotWait_{};
+    uint64_t snapshotWaitSwitches_ = 0;
+    uint64_t snapshotWaitSwitchesLogged_ = 0;
+    std::chrono::steady_clock::time_point snapshotWaitLastLog_ = {};
     std::atomic<bool> foveationValidationWarningLogged_{false};
     std::atomic<bool> videoRangeConversionWarningLogged_{false};
     std::atomic<uint32_t> droppedFrameCount_{0};
