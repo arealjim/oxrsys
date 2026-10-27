@@ -44,7 +44,9 @@ TEST_CASE("Tracking receiver accepts legacy prefixes without validating absent f
     CHECK(received.stageBoundsHeight == 4.0f);
     CHECK((received.trackingFlags & TRACKING_FLAG_RIGHT_CONTROLLER_AIM_ANGULAR_VELOCITY_VALID) == 0);
 
-    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet) - 1);
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet),
+                          offsetof(TrackingPacket, rightControllerAimAngularVelocity) +
+                              sizeof(packet.rightControllerAimAngularVelocity) - 1);
     REQUIRE(receiver.GetFreshPose(received));
     CHECK((received.trackingFlags & TRACKING_FLAG_RIGHT_CONTROLLER_AIM_ANGULAR_VELOCITY_VALID) == 0);
 

@@ -2036,6 +2036,54 @@ TEST_CASE("Suggest interaction profile bindings rejects unavailable extension-ga
     XR_CHECK(xrDestroyActionSet(actionSet));
 }
 
+TEST_CASE("Suggest interaction profile bindings takes the Steam Frame profile only with its extension",
+          "[runtime][actions]")
+{
+    auto suggestFrameBindings = [](RuntimeSessionContext& context) -> XrResult
+    {
+
+        XrActionSet actionSet = XR_NULL_HANDLE;
+        XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+        std::strncpy(actionSetCreateInfo.actionSetName, "frame", XR_MAX_ACTION_SET_NAME_SIZE);
+        std::strncpy(actionSetCreateInfo.localizedActionSetName, "Frame", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+        XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+        XrAction buttonAction = XR_NULL_HANDLE;
+        XrActionCreateInfo actionCreateInfo = {XR_TYPE_ACTION_CREATE_INFO};
+        actionCreateInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+        std::strncpy(actionCreateInfo.actionName, "button", XR_MAX_ACTION_NAME_SIZE);
+        std::strncpy(actionCreateInfo.localizedActionName, "Button", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+        XR_CHECK(xrCreateAction(actionSet, &actionCreateInfo, &buttonAction));
+
+        // The Frame's d-pad is its own buttons (dpad_up/click), not a trackpad's emulated dpad_up.
+        std::array<XrActionSuggestedBinding, 3> bindings = {{
+            {buttonAction, context.Path("/user/hand/left/input/dpad_up/click")},
+            {buttonAction, context.Path("/user/hand/right/input/x/click")},
+            {buttonAction, context.Path("/user/hand/left/input/bumper/click")},
+        }};
+        XrInteractionProfileSuggestedBinding suggestedBindings = {
+            XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        suggestedBindings.interactionProfile =
+            context.Path("/interaction_profiles/valve/frame_controller_valve");
+        suggestedBindings.suggestedBindings = bindings.data();
+        suggestedBindings.countSuggestedBindings = static_cast<uint32_t>(bindings.size());
+        const XrResult result = xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings);
+
+        XR_CHECK(xrDestroyAction(buttonAction));
+        XR_CHECK(xrDestroyActionSet(actionSet));
+        return result;
+    };
+
+    {
+        RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+        CHECK(suggestFrameBindings(context) == XR_ERROR_PATH_UNSUPPORTED);
+    }
+    {
+        RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME, "XR_VALVE_frame_controller_interaction"});
+        CHECK(suggestFrameBindings(context) == XR_SUCCESS);
+    }
+}
+
 TEST_CASE("Suggest interaction profile bindings accepts hand interaction components when enabled",
           "[runtime][actions]")
 {
