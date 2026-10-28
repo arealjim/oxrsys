@@ -80,6 +80,9 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed actions bound to a bare `.../input/trigger` or `.../input/squeeze` (an identifier with no
+  component, which OpenXR defines as the component's default) reading 0 and never pressing: they now bind
+  the analog `/value`. Apps that bind this way, such as the UEVR injector, had dead triggers and grips.
 - Fixed foveated encoding dropping every frame when an app renders its eye textures at a size
   other than the target eye size (for example The Lab at 1600x1777 for a 1512x1680 Quest 3 eye).
   The foveation kernel samples in normalized coordinates, so a source eye is now accepted when its
