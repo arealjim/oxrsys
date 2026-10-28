@@ -30,6 +30,14 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green lo
   SDKs and Vulkan headers are toolchain dependencies.
 - Keep commits focused. Commit messages must read naturally and must not mention Codex or contain
   `[codex]`.
+- Claude, Codex, and all other AI agents must never commit or push under an agent, model, or
+  provider identity. Commits must use the actual human contributor's name and email for both
+  author and committer; preserve the original human authorship when applying others' commits.
+  Do not add AI author or co-author trailers, signatures, or generated-by attribution.
+- Before committing, verify that the configured Git identity belongs to the human contributor.
+  Push only through that contributor's authorized account and credentials, never an AI or bot
+  account. Do not invent an identity or change authentication to bypass this rule; if the human
+  identity or authorized account is unavailable, leave the changes local and ask the contributor.
 
 ## Quality Bar
 
