@@ -1916,7 +1916,15 @@ static std::string ComponentFromBindingPath(const std::string& path)
     auto inputPos = path.find("/input/");
     if (inputPos != std::string::npos)
     {
-        return path.substr(inputPos + 7); // skip "/input/"
+        std::string component = path.substr(inputPos + 7); // skip "/input/"
+        // A binding to an identifier alone (.../input/trigger) means the component's default. The
+        // controllers here have only an analog value for trigger and squeeze, so bind that; boolean
+        // actions threshold it like the explicit /value path.
+        if (component == "trigger" || component == "squeeze")
+        {
+            component += "/value";
+        }
+        return component;
     }
     return "";
 }
