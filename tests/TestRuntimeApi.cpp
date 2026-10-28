@@ -1910,6 +1910,86 @@ TEST_CASE("Quest Touch profile reports float and vector inputs", "[runtime][acti
     XR_CHECK(xrDestroyActionSet(actionSet));
 }
 
+TEST_CASE("Quest Touch profile binds bare trigger and squeeze paths to their values", "[runtime][actions]")
+{
+    RuntimeSessionContext context({
+        XR_KHR_METAL_ENABLE_EXTENSION_NAME,
+        XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME,
+    });
+
+    XrPath leftHandPath = context.Path("/user/hand/left");
+    XrPath touchControllerPath = context.Path("/interaction_profiles/oculus/touch_controller");
+    XrPath bareTriggerPath = context.Path("/user/hand/left/input/trigger");
+    XrPath bareSqueezePath = context.Path("/user/hand/left/input/squeeze");
+
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(actionSetCreateInfo.actionSetName, "bare", XR_MAX_ACTION_SET_NAME_SIZE);
+    std::strncpy(actionSetCreateInfo.localizedActionSetName, "Bare", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+    XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+    auto createAction = [&](XrActionType type, const char* name) {
+        XrAction action = XR_NULL_HANDLE;
+        XrActionCreateInfo createInfo = {XR_TYPE_ACTION_CREATE_INFO};
+        createInfo.actionType = type;
+        createInfo.countSubactionPaths = 1;
+        createInfo.subactionPaths = &leftHandPath;
+        std::strncpy(createInfo.actionName, name, XR_MAX_ACTION_NAME_SIZE);
+        std::strncpy(createInfo.localizedActionName, name, XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+        XR_CHECK(xrCreateAction(actionSet, &createInfo, &action));
+        return action;
+    };
+    XrAction triggerAction = createAction(XR_ACTION_TYPE_FLOAT_INPUT, "trigger");
+    XrAction squeezeAction = createAction(XR_ACTION_TYPE_FLOAT_INPUT, "squeeze");
+
+    std::array<XrActionSuggestedBinding, 2> bindings = {{
+        {triggerAction, bareTriggerPath},
+        {squeezeAction, bareSqueezePath},
+    }};
+    XrInteractionProfileSuggestedBinding suggestedBindings = {
+        XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggestedBindings.interactionProfile = touchControllerPath;
+    suggestedBindings.suggestedBindings = bindings.data();
+    suggestedBindings.countSuggestedBindings = static_cast<uint32_t>(bindings.size());
+    XR_CHECK(xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings));
+
+    XrSessionActionSetsAttachInfo attachInfo = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets = &actionSet;
+    XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
+
+    XR_CHECK(context.setInputDeviceActiveEXT(context.session, touchControllerPath, leftHandPath, XR_TRUE));
+    XR_CHECK(context.setInputDeviceStateFloatEXT(context.session, leftHandPath,
+                                                 context.Path("/input/trigger/value"), 0.7f));
+    XR_CHECK(context.setInputDeviceStateFloatEXT(context.session, leftHandPath,
+                                                 context.Path("/input/squeeze/value"), 0.8f));
+
+    XrActiveActionSet activeActionSet = {};
+    activeActionSet.actionSet = actionSet;
+    XrActionsSyncInfo syncInfo = {XR_TYPE_ACTIONS_SYNC_INFO};
+    syncInfo.countActiveActionSets = 1;
+    syncInfo.activeActionSets = &activeActionSet;
+    XR_CHECK(xrSyncActions(context.session, &syncInfo));
+
+    XrActionStateGetInfo getInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
+    getInfo.subactionPath = leftHandPath;
+    XrActionStateFloat floatState = {XR_TYPE_ACTION_STATE_FLOAT};
+
+    getInfo.action = triggerAction;
+    XR_CHECK(xrGetActionStateFloat(context.session, &getInfo, &floatState));
+    CHECK(floatState.isActive == XR_TRUE);
+    CHECK_THAT(floatState.currentState, WithinAbs(0.7f, 0.001f));
+
+    getInfo.action = squeezeAction;
+    XR_CHECK(xrGetActionStateFloat(context.session, &getInfo, &floatState));
+    CHECK(floatState.isActive == XR_TRUE);
+    CHECK_THAT(floatState.currentState, WithinAbs(0.8f, 0.001f));
+
+    XR_CHECK(xrDestroyAction(triggerAction));
+    XR_CHECK(xrDestroyAction(squeezeAction));
+    XR_CHECK(xrDestroyActionSet(actionSet));
+}
+
 TEST_CASE("Quest Pico and simple profiles report float inputs through automation", "[runtime][actions]")
 {
     RuntimeSessionContext context({
