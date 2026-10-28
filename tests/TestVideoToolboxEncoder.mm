@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <csignal>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -258,6 +259,69 @@ TEST_CASE("Foveated encoding allows a 1% aspect mismatch and rejects more",
                    /*tenBit=*/false, /*forceSoftware=*/false, 128, 129);
     EncodeOneFrame(oxr::protocol::VideoCodec::H264, MTLPixelFormatBGRA8Unorm, /*foveated=*/true,
                    /*tenBit=*/false, /*forceSoftware=*/false, 128, 130, /*expectEncoded=*/false);
+}
+
+TEST_CASE("A run of frames dropped before encode does not stall the next frame",
+          "[video][encoder][videotoolbox][foveation]")
+{
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    REQUIRE(device != nil);
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    REQUIRE(queue != nil);
+    GraphicsContext graphics = GraphicsContext::Metal((__bridge void*)device,
+                                                       (__bridge void*)queue);
+
+    auto encoder = std::make_unique<VideoEncoder>();
+    VideoEncoder::FoveationSettings settings = {};
+    settings.enabled = true;
+    settings.targetEyeWidth = 64;
+    settings.targetEyeHeight = 64;
+    settings.eyeWidthRatio = 1.0f;
+    settings.eyeHeightRatio = 1.0f;
+    settings.centerSizeX = 0.5f;
+    settings.centerSizeY = 0.5f;
+    settings.edgeRatioX = 2.0f;
+    settings.edgeRatioY = 2.0f;
+    encoder->SetFoveationSettings(settings);
+    REQUIRE(encoder->Initialize(128, 64, 60, 8, graphics, oxr::protocol::VideoCodec::H264));
+
+    // 128x130 is more than 1% off the 64x64 target aspect, so each of these is dropped after the
+    // frame's command buffer was made: more of them than a Metal queue's default 64 command buffers,
+    // then a good frame. All of it runs on a thread we can stop waiting on.
+    constexpr uint32_t kDrops = 100;
+    auto done = std::make_shared<std::promise<bool>>();
+    std::future<bool> result = done->get_future();
+    VideoEncoder* raw = encoder.get();
+    std::thread([raw, device, done] {
+        bool allDropped = true;
+        for (uint32_t i = 0; i < kDrops; ++i)
+        {
+            FrameSource frame = {};
+            frame.left = MakeSource(device, 128, 130, MTLPixelFormatBGRA8Unorm);
+            frame.right = MakeSource(device, 128, 130, MTLPixelFormatBGRA8Unorm);
+            allDropped = !raw->EncodeStereo(std::move(frame), 1'000'000 + i,
+                                            [](const uint8_t*, size_t, bool, int64_t) {},
+                                            [](const VideoEncoder::FrameMetrics&) {}) && allDropped;
+        }
+        FrameSource frame = {};
+        frame.left = MakeSource(device, 64, 64, MTLPixelFormatBGRA8Unorm);
+        frame.right = MakeSource(device, 64, 64, MTLPixelFormatBGRA8Unorm);
+        const bool submitted = raw->EncodeStereo(std::move(frame), 2'000'000,
+                                                 [](const uint8_t*, size_t, bool, int64_t) {},
+                                                 [](const VideoEncoder::FrameMetrics&) {});
+        done->set_value(allDropped && submitted);
+    }).detach();
+    if (result.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
+    {
+        // The encoder is stuck inside EncodeStereo; leave it (and its device) alive rather than
+        // destroy it under that thread.
+        encoder.release();
+        FAIL("EncodeStereo did not return within 10 s: " << kDrops << " drops before encode, then a good frame");
+    }
+    CHECK(result.get());
+    encoder->Shutdown();
+    [queue release];
+    [device release];
 }
 
 TEST_CASE("VideoToolbox shutdown drains submitted frame-source ownership",

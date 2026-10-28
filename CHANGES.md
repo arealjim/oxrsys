@@ -84,6 +84,13 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
   handlers if a signal arrived between `fork()` and `exec()`. In a multithreaded process the child is not safe to run
   arbitrary code in that window; `ctest` left crash reports from orphaned `oxrsys_runtime_tests` children behind. The
   fork now happens with every signal blocked, and the child resets each caught signal to its default before unblocking.
+- Fixed the video encoder freezing for good after 64 frames dropped before encode. The runtime is
+  built without ARC and the encode thread had no autorelease pool, so each frame's autoreleased
+  Metal command buffer lived until the thread exited. A frame dropped after its command buffer was
+  made (an invalid foveated source size or format, a crop failure, an encoder that would not
+  create) left one that was never committed, and once 64 were outstanding the next
+  [queue commandBuffer] blocked the encode thread forever. Encode and EncodeStereo now drain a pool
+  per frame.
 - Fixed actions bound to a bare `.../input/trigger` or `.../input/squeeze` (an identifier with no
   component, which OpenXR defines as the component's default) reading 0 and never pressing: they now bind
   the analog `/value`. Apps that bind this way, such as the UEVR injector, had dead triggers and grips.

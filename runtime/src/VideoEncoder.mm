@@ -1619,8 +1619,13 @@ bool VideoEncoder::Encode(FrameImageSource imageSource, int64_t timestampNs, OnN
 {
     FrameSource frameSource = {};
     frameSource.left = std::move(imageSource);
-    return EncodeInternal(std::move(frameSource), false, timestampNs,
-                          std::move(callback), std::move(frameCallback));
+    bool submitted = false;
+    @autoreleasepool
+    {
+        submitted = EncodeInternal(std::move(frameSource), false, timestampNs,
+                                   std::move(callback), std::move(frameCallback));
+    }
+    return submitted;
 }
 
 bool VideoEncoder::FlushPendingFrames(std::chrono::milliseconds timeout)
@@ -1661,10 +1666,20 @@ bool VideoEncoder::FlushPendingFrames(std::chrono::milliseconds timeout)
 bool VideoEncoder::EncodeStereo(FrameSource frameSource, int64_t timestampNs, OnNalUnitCallback callback,
                                  OnFrameEncodedCallback frameCallback)
 {
-    return EncodeInternal(std::move(frameSource), true, timestampNs,
-                          std::move(callback), std::move(frameCallback));
+    bool submitted = false;
+    @autoreleasepool
+    {
+        submitted = EncodeInternal(std::move(frameSource), true, timestampNs,
+                                   std::move(callback), std::move(frameCallback));
+    }
+    return submitted;
 }
 
+// Encode and EncodeStereo drain an autorelease pool around each frame. The runtime is built
+// without ARC and its encode thread has no pool of its own, so the autoreleased command buffer
+// from [queue commandBuffer] lived until the thread exited. A committed one completes and stops
+// counting against the queue; one abandoned by a drop before encode never does, and after the
+// queue's 64 the next commandBuffer call blocked the encoder for good.
 bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
                                    int64_t timestampNs, OnNalUnitCallback callback,
                                    OnFrameEncodedCallback frameCallback)
