@@ -80,6 +80,10 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed the `adb` children the runtime forks (the Quest logcat clear and capture) running the parent's signal
+  handlers if a signal arrived between `fork()` and `exec()`. In a multithreaded process the child is not safe to run
+  arbitrary code in that window; `ctest` left crash reports from orphaned `oxrsys_runtime_tests` children behind. The
+  fork now happens with every signal blocked, and the child resets each caught signal to its default before unblocking.
 - Fixed the video encoder freezing for good after 64 frames dropped before encode. The runtime is
   built without ARC and the encode thread had no autorelease pool, so each frame's autoreleased
   Metal command buffer lived until the thread exited. A frame dropped after its command buffer was
