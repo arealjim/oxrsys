@@ -99,8 +99,9 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
   run of datagrams (a NAL unit's data and FEC parity, or a NACK's retransmits) through the copy, so
   the rest of the run could reach a descriptor the kernel had already reused. Stop now releases the
   socket where it used to close it, which still frees a sender blocked in `sendto()`, but keeps the
-  number (holding `/dev/null`) until those threads are joined, and closes it after. The video
-  socket also gets a 100 ms send timeout, so no send can hold up the join indefinitely.
+  number (holding `/dev/null`) until those threads are joined, and closes it after. If `/dev/null`
+  cannot be put in its place, the socket stays open until the joins instead. The video socket also
+  gets a 100 ms send timeout, so no send can hold up the join indefinitely.
 - Fixed foveated encoding dropping every frame when an app renders its eye textures at a size
   other than the target eye size (for example The Lab at 1600x1777 for a 1512x1680 Quest 3 eye).
   The foveation kernel samples in normalized coordinates, so a source eye is now accepted when its

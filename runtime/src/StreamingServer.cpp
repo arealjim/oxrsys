@@ -793,9 +793,12 @@ bool StreamingServer::Stop(std::chrono::nanoseconds timeout)
     // datagrams through the copy. Closing it here released a sender blocked in sendto(), which
     // the joins below depend on, but freed the number while a run could still be using it. So
     // the socket is released now and the number is kept, holding /dev/null, until the joins.
+    // If that fails, the socket stays open until the joins; the send timeout set in Start bounds
+    // a sender blocked in it.
     if (!oxrsys::runtime_socket::RetireKeepingDescriptor(videoSocket_))
     {
-        spdlog::warn("StreamingServer: could not keep the video socket's descriptor; closed it");
+        spdlog::warn("StreamingServer: could not release the video socket early; it stays open "
+                     "until its senders are joined");
     }
 
     {
