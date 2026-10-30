@@ -33,16 +33,39 @@ id<MTLTexture> MakeTexture(id<MTLDevice> device, MTLPixelFormat format, uint32_t
                                                                                 height:h
                                                                              mipmapped:NO];
     d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
-    d.storageMode = MTLStorageModeShared;
+    // Shared textures are only CPU-coherent with what the GPU renders on unified memory (Apple
+    // silicon); an Intel Mac reads back the bytes it uploaded. Managed works on both for the upload,
+    // and ReadPixel reads through a blit instead of from the texture's CPU copy.
+    d.storageMode = device.hasUnifiedMemory ? MTLStorageModeShared : MTLStorageModeManaged;
     id<MTLTexture> t = [device newTextureWithDescriptor:d];
+    REQUIRE(t != nil);
     [t replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0 withBytes:pixels.data() bytesPerRow:w * 4];
     return t;
 }
 
 Bgra ReadPixel(id<MTLTexture> t, uint32_t x, uint32_t y)
 {
+    // Copy the pixel on the GPU into a shared buffer, so the read sees what was rendered on any Mac.
+    id<MTLCommandQueue> queue = [t.device newCommandQueue];
+    id<MTLBuffer> buffer = [t.device newBufferWithLength:sizeof(Bgra) options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    [blit copyFromTexture:t
+                     sourceSlice:0
+                     sourceLevel:0
+                    sourceOrigin:MTLOriginMake(x, y, 0)
+                      sourceSize:MTLSizeMake(1, 1, 1)
+                        toBuffer:buffer
+               destinationOffset:0
+          destinationBytesPerRow:sizeof(Bgra)
+        destinationBytesPerImage:sizeof(Bgra)];
+    [blit endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
     Bgra p = {};
-    [t getBytes:&p bytesPerRow:4 fromRegion:MTLRegionMake2D(x, y, 1, 1) mipmapLevel:0];
+    std::memcpy(&p, buffer.contents, sizeof(p));
+    [buffer release];
+    [queue release];
     return p;
 }
 
