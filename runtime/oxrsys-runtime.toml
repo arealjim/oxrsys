@@ -54,7 +54,8 @@ encoder_10bit = false
 
 # Scheduling of the app thread that waits in xrWaitFrame. "default" leaves it alone; "realtime"
 # gives it a Mach time-constraint policy, so its sleep to each frame deadline wakes on time instead
-# of up to several ms late, and the frame cadence holds steady. Applied on each thread's first wait.
+# of up to several ms late, and the frame cadence holds steady. The thread's previous policy comes back
+# when the session ends or this is set back to "default".
 pacing_thread = "default"
 
 # Out-of-process native-arm64 HARDWARE video encoder helper.

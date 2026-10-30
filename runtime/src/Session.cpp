@@ -267,6 +267,10 @@ XrResult Session::EndSession()
     }
 
     running_ = false;
+    {
+        std::scoped_lock lock(pacingThreadMutex_);
+        RestorePacingThreadLocked();
+    }
 
     // Stop streaming so it can be restarted on next BeginSession
     streamingSnapshotDemand_->store(false, std::memory_order_release);
@@ -332,6 +336,10 @@ XrResult Session::Shutdown()
         std::scoped_lock lock(frameStateMutex_);
         frameBegun_ = false;
         waitedFrameCount_ = 0;
+    }
+    {
+        std::scoped_lock lock(pacingThreadMutex_);
+        RestorePacingThreadLocked();
     }
 
     if (inputManager_)
@@ -429,23 +437,45 @@ void Session::GetDebugUtilsLabels(std::vector<XrDebugUtilsLabelEXT>& labels, std
 
 // pacing_thread = "realtime": the sleep_until below runs on the app's render thread, and at default
 // priority macOS lets that wake land up to several ms after the deadline, which shows up as
-// frame-interval jitter. The policy belongs to the calling thread, so it is applied once per thread
-// rather than once per session.
-static void ApplyPacingThreadPolicy(std::chrono::nanoseconds framePeriod)
+// frame-interval jitter. The policy belongs to the waiting thread: it is set on that thread's wait,
+// set again when the frame period changes, and the thread gets its previous policy back when
+// realtime pacing is switched off, another thread takes over the wait, or the session ends.
+void Session::UpdatePacingThread(std::chrono::nanoseconds framePeriod)
 {
-    thread_local bool applied = false;
-    if (applied)
+    const bool realtime = Config::Get().GetValues().pacingThread == "realtime";
+    const std::thread::id caller = std::this_thread::get_id();
+    std::scoped_lock lock(pacingThreadMutex_);
+    switch (oxrsys::pacing_thread::Decide(pacingThread_, realtime, caller, framePeriod))
     {
-        return;
-    }
-    applied = true;
-    if (Config::Get().GetValues().pacingThread != "realtime")
-    {
-        return;
+        case oxrsys::pacing_thread::Action::Keep:
+            return;
+        case oxrsys::pacing_thread::Action::Restore:
+            RestorePacingThreadLocked();
+            return;
+        case oxrsys::pacing_thread::Action::Move:
+            RestorePacingThreadLocked();
+            [[fallthrough]];
+        case oxrsys::pacing_thread::Action::Promote:
+            pacingThreadSaved_ = oxrsys::runtime_platform::SaveCurrentThreadPolicy();
+            [[fallthrough]];
+        case oxrsys::pacing_thread::Action::Retune:
+            break;
     }
     const bool ok = oxrsys::runtime_platform::SetCurrentThreadRealtime(framePeriod);
+    pacingThread_ = {caller, framePeriod};
     spdlog::info("OXRSys: Session::WaitFrame pacing_thread=realtime period={}us applied={}",
                  framePeriod.count() / 1000, ok);
+}
+
+void Session::RestorePacingThreadLocked()
+{
+    if (pacingThread_.thread == std::thread::id{})
+    {
+        return;
+    }
+    const bool ok = oxrsys::runtime_platform::RestoreThreadPolicy(pacingThreadSaved_);
+    pacingThread_ = {};
+    spdlog::info("OXRSys: Session pacing_thread previous policy restored={}", ok);
 }
 
 XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* frameState)
@@ -491,7 +521,7 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
     // absorbed by the next and the cadence locks to the panel period with low
     // variance. targetFrameTime comes from the client-reported (negotiated) refresh.
     auto targetFrameTime = std::chrono::nanoseconds(1000000000ll / targetRefreshHz);
-    ApplyPacingThreadPolicy(targetFrameTime);
+    UpdatePacingThread(targetFrameTime);
     auto now = std::chrono::steady_clock::now();
 
     if (nextFrameDeadline_.time_since_epoch().count() == 0 || pacingPeriod_ != targetFrameTime)

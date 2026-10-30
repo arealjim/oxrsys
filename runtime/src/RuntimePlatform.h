@@ -33,4 +33,22 @@ void SetCurrentThreadTimeSensitive();
 // kernel refused the policy (the thread keeps its old one).
 bool SetCurrentThreadRealtime(std::chrono::nanoseconds period);
 
+// A thread's scheduling policy from before SetCurrentThreadRealtime, so it can be put back. Holds a
+// Mach send right to the thread, released by RestoreThreadPolicy.
+struct SavedThreadPolicy
+{
+    uint32_t thread = 0;
+    bool timeConstraint = false; // false: the thread was on the standard policy
+    uint32_t period = 0;
+    uint32_t computation = 0;
+    uint32_t constraint = 0;
+    bool preemptible = false;
+};
+
+SavedThreadPolicy SaveCurrentThreadPolicy();
+
+// Put a saved policy back. Any thread may call it; the saved thread need not be the caller. Returns
+// false if the kernel refused it, for example because the thread has exited.
+bool RestoreThreadPolicy(const SavedThreadPolicy& saved);
+
 } // namespace oxrsys::runtime_platform

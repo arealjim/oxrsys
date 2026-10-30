@@ -35,7 +35,8 @@ struct ConfigValues
     // pacing_thread: "default" | "realtime". realtime gives each thread that calls xrWaitFrame a
     // Mach time-constraint policy (period = one frame, computation = a third of it, constraint =
     // half of it), so its sleep to the frame deadline wakes on time instead of up to several ms
-    // late. Applied once per thread, on its first xrWaitFrame. Anything else reads as "default".
+    // late. Set again when the frame period changes; the thread's previous policy comes back when
+    // the session ends or the key is switched off. Anything else reads as "default".
     std::string pacingThread = "default";
 
     // Out-of-process native-arm64 hardware encoder helper. When the runtime
