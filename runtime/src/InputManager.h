@@ -165,6 +165,10 @@ private:
     // the touch bits that go with it. Zero from a client that does not say.
     uint32_t controllerProfile_ = 0;
     uint32_t touchState_ = 0;
+    // The buttons and grips as the client sent them, before OXRSYS_FRAME_XBOX: the Frame profile's own bindings
+    // read these, so the Xbox layout reaches Touch bindings only.
+    uint32_t frameButtonState_ = 0;
+    std::array<float, 2> frameGripValue_ = {0.0f, 0.0f};
     std::array<bool, 2> streamingControllerActive_ = {false, false};
     std::string streamingClientName_;
     std::string streamingControllerProfile_;

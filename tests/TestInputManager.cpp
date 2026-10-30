@@ -830,6 +830,47 @@ TEST_CASE("InputManager — OXRSYS_FRAME_XBOX puts each Frame letter on the same
     CHECK_FALSE(pressed(L, "x/click"));
 }
 
+TEST_CASE("InputManager — OXRSYS_FRAME_XBOX leaves native Frame inputs alone", "[input]")
+{
+    // The Xbox layout feeds Touch bindings only. A binding on the Frame's own profile reads the controller as sent.
+    using namespace oxr::protocol;
+    constexpr const char* kFrame = "/interaction_profiles/valve/frame_controller_valve";
+    constexpr const char* kTouch = "/interaction_profiles/oculus/touch_controller";
+    InputManager im;
+    im.SetFrameXboxLayout(true);
+    TrackingReceiver receiver;
+    im.SetTrackingReceiver(&receiver);
+    im.SetStreamingClientName("FrameClient");
+    const auto L = InputManager::Hand::Left;
+    const auto R = InputManager::Hand::Right;
+
+    TrackingPacket packet = {};
+    packet.timestampNs = 1'000'000'000;
+    packet.headOrientation[3] = 1.0f;
+    packet.trackingFlags = TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE | TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.rightControllerRot[3] = 1.0f;
+    packet.controllerProfile = CONTROLLER_PROFILE_VALVE_FRAME;
+    packet.buttonState = BUTTON_LEFT_BUMPER | BUTTON_FRAME_RIGHT_MENU;
+    packet.leftGrip = 0.25f;
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    im.Update(0.0f);
+
+    // Native: the bumper is the bumper, the squeeze keeps its own value, and the right menu is not the left view.
+    CHECK(im.GetBooleanComponentForProfile(L, "bumper/click", kFrame));
+    CHECK(im.GetFloatComponentForProfile(L, "squeeze/value", kFrame) == 0.25f);
+    CHECK_FALSE(im.GetBooleanComponentForProfile(L, "squeeze/value", kFrame));
+    CHECK(im.GetFloatComponentForProfile(R, "squeeze/value", kFrame) == 0.0f);
+    CHECK(im.GetBooleanComponentForProfile(R, "menu/click", kFrame));
+    CHECK_FALSE(im.GetBooleanComponentForProfile(L, "view/click", kFrame));
+
+    // Touch, laid out as Xbox: the bumper squeezes the grip and the right menu is the menu.
+    CHECK(im.GetFloatComponentForProfile(L, "squeeze/value", kTouch) == 1.0f);
+    CHECK(im.GetBooleanComponentForProfile(L, "squeeze/value", kTouch));
+    CHECK(im.GetFloatComponentForProfile(R, "squeeze/value", kTouch) == 0.0f);
+    CHECK(im.GetBooleanComponentForProfile(L, "menu/click", kTouch));
+}
+
 TEST_CASE("TrackingReceiver — a packet that stops before touchState carries no controller profile", "[input]")
 {
     using namespace oxr::protocol;

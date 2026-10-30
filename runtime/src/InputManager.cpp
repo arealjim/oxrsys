@@ -338,6 +338,8 @@ void InputManager::UpdateFromStreaming()
         ApplyFrameXboxLayout(buttons, leftGrip, rightGrip);
     }
     buttonState_ = buttons;
+    frameButtonState_ = packet.buttonState;
+    frameGripValue_ = {packet.leftGrip, packet.rightGrip};
     controllerProfile_ = packet.controllerProfile;
     touchState_ = packet.touchState;
     leftTrigger_ = packet.leftTrigger;
@@ -420,9 +422,8 @@ void InputManager::UpdateFromStreaming()
 // right B, X and Y into one button and the d-pad into two, and drops the bumpers and the right menu; the Frame
 // client's per-input bits carry each one, so the Touch bits are rebuilt from those: each Frame letter lands on the
 // Xbox button of the same letter, the bumpers press the grips and the right menu is MENU. A packet without Frame bits
-// (another client, or nothing pressed) is left alone. The Frame bits stay, so a Frame-profile binding still reads
-// its own inputs, except that the left view (BUTTON_MENU) also reads the right menu while this is on. Sifu under
-// UEVR, 2026-10-26.
+// (another client, or nothing pressed) is left alone. Frame-profile bindings read the unmapped state
+// (frameButtonState_, frameGripValue_), so this never changes them. Sifu under UEVR, 2026-10-26.
 void InputManager::ApplyFrameXboxLayout(uint32_t& buttons, float& leftGrip, float& rightGrip)
 {
     using namespace oxr::protocol;
@@ -941,11 +942,15 @@ bool InputManager::GetFrameControllerComponent(Hand hand, const std::string& com
     const size_t slash = componentPath.find('/');
     const std::string input = componentPath.substr(0, slash);
     const std::string kind = slash == std::string::npos ? "" : componentPath.substr(slash + 1);
+    if (componentPath == "squeeze/value")
+    {
+        return frameGripValue_[HandIndex(hand)] > 0.5f;
+    }
     if (kind != "click" && kind != "touch")
     {
-        return GetButtonClick(hand, componentPath);   // the float thresholds: trigger/value, squeeze/value
+        return GetButtonClick(hand, componentPath);   // the float threshold: trigger/value
     }
-    const uint32_t bits = (kind == "touch") ? touchState_ : buttonState_;
+    const uint32_t bits = (kind == "touch") ? touchState_ : frameButtonState_;
 
     uint32_t mask = 0;
     if (!left && input == "a") mask = BUTTON_FRAME_A;
@@ -1050,7 +1055,7 @@ float InputManager::GetFloatComponentForProfile(Hand hand, const std::string& co
     }
     if (componentPath == "squeeze/value")
     {
-        return GetGrabValue(hand);
+        return profilePath == kValveFrameProfile ? frameGripValue_[HandIndex(hand)] : GetGrabValue(hand);
     }
     if (componentPath == "thumbstick/x")
     {
