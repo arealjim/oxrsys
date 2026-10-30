@@ -6,6 +6,10 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Added
 
+- Quad layers and `XR_KHR_composition_layer_cylinder` layers are now composited into each eye before
+  encode, so application menus, HUDs and panels reach the headset; before, quads were validated and
+  dropped, and cylinders failed the frame. Layers before the projection layer, infinite cylinders and
+  other layer types are not drawn yet.
 - Added config send_pacing_ms (default 0 = burst, as before) and send_pacing_keyframe_ms (0 = twice
   send_pacing_ms): the UDP datagrams of each encoded frame (data and FEC parity) are spread evenly
   over that window instead of reaching the socket as one burst, which an access point queue under

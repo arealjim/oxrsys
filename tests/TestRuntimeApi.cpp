@@ -3177,11 +3177,6 @@ TEST_CASE("EndFrame rejects composition paths without a compositor", "[runtime][
         layerCount = 1;
         expectedResult = XR_ERROR_LAYER_INVALID;
     }
-    SECTION("Projection followed by quad")
-    {
-        layers[1] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayer);
-        expectedResult = XR_ERROR_LAYER_INVALID;
-    }
     SECTION("Two projection layers")
     {
         projectionLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
@@ -3282,6 +3277,75 @@ TEST_CASE("XR_KHR_convert_timespec_time bridges CLOCK_MONOTONIC and XrTime", "[r
             std::llabs(static_cast<int64_t>(frameState.predictedDisplayTime) -
                        static_cast<int64_t>(xrNow));
         CHECK(deltaNs < 5'000'000'000LL);
+    }
+}
+
+TEST_CASE("EndFrame takes a cylinder layer only when its extension is enabled", "[runtime][frame][layers]")
+{
+    auto runCylinderCase = [](RuntimeSessionContext& context, XrResult expectedResult)
+    {
+        XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+        XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
+        XR_BEGIN_FRAME_CHECK(xrBeginFrame(context.session, nullptr));
+
+        const int64_t format = SelectColorSwapchainFormat(context.session);
+        XrSwapchain swapchain = CreateColorSwapchain(context.session, format);
+        uint32_t imageIndex = 0;
+        XR_CHECK(xrAcquireSwapchainImage(swapchain, nullptr, &imageIndex));
+        XrSwapchainImageWaitInfo waitInfo = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+        waitInfo.timeout = 0;
+        XR_CHECK(xrWaitSwapchainImage(swapchain, &waitInfo));
+        XR_CHECK(xrReleaseSwapchainImage(swapchain, nullptr));
+
+        XrCompositionLayerProjectionView projectionViews[2] = {};
+        for (auto& view : projectionViews)
+        {
+            view.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
+            view.pose.orientation.w = 1.0f;
+            view.fov.angleLeft = -0.5f;
+            view.fov.angleRight = 0.5f;
+            view.fov.angleUp = 0.5f;
+            view.fov.angleDown = -0.5f;
+            view.subImage.swapchain = swapchain;
+            view.subImage.imageRect.extent = {16, 16};
+        }
+        XrCompositionLayerProjection projectionLayer = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        projectionLayer.space = context.localSpace;
+        projectionLayer.viewCount = 2;
+        projectionLayer.views = projectionViews;
+
+        XrCompositionLayerCylinderKHR cylinderLayer = {XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR};
+        cylinderLayer.space = context.localSpace;
+        cylinderLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+        cylinderLayer.pose.orientation.w = 1.0f;
+        cylinderLayer.pose.position.z = -1.0f;
+        cylinderLayer.radius = 1.0f;
+        cylinderLayer.centralAngle = 1.0f;
+        cylinderLayer.aspectRatio = 2.0f;
+        cylinderLayer.subImage.swapchain = swapchain;
+        cylinderLayer.subImage.imageRect.extent = {16, 16};
+
+        const XrCompositionLayerBaseHeader* layers[] = {
+            reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer),
+            reinterpret_cast<const XrCompositionLayerBaseHeader*>(&cylinderLayer),
+        };
+        XrFrameEndInfo frameEndInfo = {XR_TYPE_FRAME_END_INFO};
+        frameEndInfo.displayTime = frameState.predictedDisplayTime;
+        frameEndInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        frameEndInfo.layerCount = 2;
+        frameEndInfo.layers = layers;
+
+        CHECK(xrEndFrame(context.session, &frameEndInfo) == expectedResult);
+        XR_CHECK(xrDestroySwapchain(swapchain));
+    };
+
+    {
+        RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME, XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME});
+        runCylinderCase(context, XR_SUCCESS);
+    }
+    {
+        RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+        runCylinderCase(context, XR_ERROR_LAYER_INVALID);
     }
 }
 
