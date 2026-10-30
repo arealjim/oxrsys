@@ -1648,13 +1648,6 @@ void StreamingServer::EncodeThread()
 void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& clientConnect,
                                           const sockaddr_in& clientAddr)
 {
-    // A new client brings a new clock; drop the previous client's tracking history so its
-    // last timestamp cannot shadow every packet of this one (see TrackingReceiver::ResetHistory).
-    if (trackingReceiver_)
-    {
-        trackingReceiver_->ResetHistory();
-    }
-
     char ipStr[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &clientAddr.sin_addr, ipStr, sizeof(ipStr));
 
@@ -1684,6 +1677,15 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
             }
             return;
         }
+    }
+
+    // A new client brings a new clock; drop the previous client's tracking history so its
+    // last timestamp cannot shadow every packet of this one (see TrackingReceiver::ResetHistory).
+    // From here on only this address may send tracking.
+    if (trackingReceiver_)
+    {
+        trackingReceiver_->ResetHistory();
+        trackingReceiver_->SetClientAddress(clientAddr.sin_addr.s_addr);
     }
 
     std::string clientName(clientConnect.deviceName,
@@ -1908,10 +1910,12 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
 
 void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect& clientConnect)
 {
-    // Same as HandleClientConnect: a new client brings a new clock.
+    // Same as HandleClientConnect: a new client brings a new clock. USB tracking arrives over
+    // TCP, so no UDP sender is the client.
     if (trackingReceiver_)
     {
         trackingReceiver_->ResetHistory();
+        trackingReceiver_->SetClientAddress(0);
     }
 
     std::string clientName(clientConnect.deviceName,
@@ -2161,6 +2165,7 @@ void StreamingServer::HandleClientDisconnect()
     if (trackingReceiver_ != nullptr)
     {
         trackingReceiver_->Reset();
+        trackingReceiver_->SetClientAddress(0);
     }
     InvalidateCallbackAccess();
 
