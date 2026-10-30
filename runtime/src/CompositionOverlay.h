@@ -85,13 +85,32 @@ inline glm::vec3 OverlayCylinderPoint(float radius, float centralAngle, float he
     return glm::vec3(radius * std::sin(theta), (0.5f - t) * height, -radius * std::cos(theta));
 }
 
-// Cylinders with radius 0 or +inf are "infinite" in the spec; we cannot draw
-// those as geometry and skip them.
+// Cylinders with radius 0 or +inf are "infinite" in the spec: the layer sits at
+// infinity, so only the eye's and the layer's orientations place it.
+inline bool IsInfiniteCylinder(float radius)
+{
+    return radius == 0.0f || std::isinf(radius);
+}
+
 inline bool IsDrawableCylinder(float radius, float centralAngle, float aspectRatio)
 {
-    return std::isfinite(radius) && radius > 0.0f &&
+    return radius >= 0.0f &&
            std::isfinite(centralAngle) && centralAngle > 0.0f &&
            std::isfinite(aspectRatio) && aspectRatio > 0.0f;
+}
+
+// clip <- layer-local metres for a layer at infinity: OverlayClipFromLayer with
+// every position dropped. A unit-radius cylinder drawn with it is centred on the
+// eye, so it covers exactly the directions of the infinite one.
+inline glm::mat4 OverlayClipFromLayerAtInfinity(XrPosef eyePose,
+                                                const XrFovf& eyeFov,
+                                                XrPosef layerSpaceInProjectionSpace,
+                                                XrPosef layerPose)
+{
+    eyePose.position = {0.0f, 0.0f, 0.0f};
+    layerSpaceInProjectionSpace.position = {0.0f, 0.0f, 0.0f};
+    layerPose.position = {0.0f, 0.0f, 0.0f};
+    return OverlayClipFromLayer(eyePose, eyeFov, layerSpaceInProjectionSpace, layerPose);
 }
 
 inline float CylinderHeight(float radius, float centralAngle, float aspectRatio)

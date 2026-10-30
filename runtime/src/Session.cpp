@@ -921,7 +921,6 @@ void Session::AppendOverlayLayers(const XrFrameEndInfo& frameEndInfo, uint32_t p
     }
 
     static std::atomic_bool loggedUnderlay{false};
-    static std::atomic_bool loggedInfiniteCylinder{false};
     static std::atomic_bool loggedFirstOverlay{false};
 
     for (uint32_t i = 0; i < frameEndInfo.layerCount; ++i)
@@ -950,6 +949,7 @@ void Session::AppendOverlayLayers(const XrFrameEndInfo& frameEndInfo, uint32_t p
         XrPosef layerPose = {};
         XrEyeVisibility eyeVisibility = XR_EYE_VISIBILITY_BOTH;
         XrSwapchainSubImage subImage = {};
+        bool atInfinity = false;
         if (isQuad)
         {
             const auto& quad = *reinterpret_cast<const XrCompositionLayerQuad*>(layer);
@@ -972,19 +972,13 @@ void Session::AppendOverlayLayers(const XrFrameEndInfo& frameEndInfo, uint32_t p
             const auto& cylinder = *reinterpret_cast<const XrCompositionLayerCylinderKHR*>(layer);
             if (!oxrsys::runtime::IsDrawableCylinder(cylinder.radius, cylinder.centralAngle, cylinder.aspectRatio))
             {
-                if (cylinder.radius == 0.0f || std::isinf(cylinder.radius))
-                {
-                    if (!loggedInfiniteCylinder.exchange(true))
-                    {
-                        spdlog::info("OXRSys: an infinite-radius cylinder layer is not drawn");
-                    }
-                }
                 continue;
             }
+            atInfinity = oxrsys::runtime::IsInfiniteCylinder(cylinder.radius);
             overlay.shape = FrameOverlayLayer::Shape::Cylinder;
-            overlay.radius = cylinder.radius;
+            overlay.radius = atInfinity ? 1.0f : cylinder.radius;
             overlay.centralAngle = cylinder.centralAngle;
-            overlay.height = oxrsys::runtime::CylinderHeight(cylinder.radius, cylinder.centralAngle, cylinder.aspectRatio);
+            overlay.height = oxrsys::runtime::CylinderHeight(overlay.radius, cylinder.centralAngle, cylinder.aspectRatio);
             overlay.sourceAlpha = (cylinder.layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT) != 0;
             overlay.unpremultipliedAlpha = (cylinder.layerFlags & XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT) != 0;
             layerSpaceHandle = cylinder.space;
@@ -1030,7 +1024,9 @@ void Session::AppendOverlayLayers(const XrFrameEndInfo& frameEndInfo, uint32_t p
         for (uint32_t eye = 0; eye < 2; ++eye)
         {
             const XrCompositionLayerProjectionView& view = projection.views[eye];
-            const glm::mat4 clip = oxrsys::runtime::OverlayClipFromLayer(view.pose, view.fov, location.pose, layerPose);
+            const glm::mat4 clip = atInfinity
+                ? oxrsys::runtime::OverlayClipFromLayerAtInfinity(view.pose, view.fov, location.pose, layerPose)
+                : oxrsys::runtime::OverlayClipFromLayer(view.pose, view.fov, location.pose, layerPose);
             std::memcpy(overlay.clipFromLayer[eye], &clip[0][0], sizeof(overlay.clipFromLayer[eye]));
         }
 

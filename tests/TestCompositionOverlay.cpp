@@ -125,7 +125,33 @@ TEST_CASE("A cylinder puts its image centre ahead and its right edge to the righ
     REQUIRE(std::hypot(rightTop.x, rightTop.z) == Approx(radius));
     REQUIRE(rightTop.y == Approx(0.5f));
 
-    REQUIRE_FALSE(IsDrawableCylinder(0.0f, angle, 1.0f));
-    REQUIRE_FALSE(IsDrawableCylinder(INFINITY, angle, 1.0f));
     REQUIRE(IsDrawableCylinder(radius, angle, 1.0f));
+}
+
+TEST_CASE("An infinite cylinder is placed by orientations only", "[runtime][overlay]")
+{
+    REQUIRE(IsInfiniteCylinder(0.0f));
+    REQUIRE(IsInfiniteCylinder(INFINITY));
+    REQUIRE_FALSE(IsInfiniteCylinder(2.0f));
+    REQUIRE(IsDrawableCylinder(0.0f, kPi / 4, 1.0f));
+    REQUIRE(IsDrawableCylinder(INFINITY, kPi / 4, 1.0f));
+
+    // Drawn at radius 1: the right edge is 22.5 degrees right, whatever the positions.
+    const float height = CylinderHeight(1.0f, kPi / 4, 1.0f);
+    const glm::vec3 centre = OverlayCylinderPoint(1.0f, kPi / 4, height, 0.5f, 0.5f);
+    const glm::vec3 rightEdge = OverlayCylinderPoint(1.0f, kPi / 4, height, 1.0f, 0.5f);
+    const glm::mat4 moved = OverlayClipFromLayerAtInfinity(Pose(0.032f, 0.1f, 0.5f), SymmetricFov(kPi / 4),
+                                                           Pose(3, 1, 0), Pose(0, 0, -2));
+    REQUIRE(Ndc(Project(moved, centre)).x == Approx(0.0f).margin(1e-5));
+    REQUIRE(Ndc(Project(moved, centre)).y == Approx(0.0f).margin(1e-5));
+    REQUIRE(Ndc(Project(moved, rightEdge)).x == Approx(std::tan(kPi / 8)).margin(1e-5));
+
+    // Orientations still count: a layer turned 0.3 rad left sits tan(0.3) left of centre,
+    // and an eye turned the same way looks straight at it again.
+    const glm::mat4 turnedLayer = OverlayClipFromLayerAtInfinity(Pose(0.032f, 0, 0), SymmetricFov(kPi / 4),
+                                                                 Pose(0, 0, 0), Pose(1, 0, -2, 0.3f));
+    REQUIRE(Ndc(Project(turnedLayer, centre)).x == Approx(-std::tan(0.3f)).margin(1e-5));
+    const glm::mat4 turnedBoth = OverlayClipFromLayerAtInfinity(Pose(0.032f, 0, 0, 0.3f), SymmetricFov(kPi / 4),
+                                                                Pose(0, 0, 0), Pose(1, 0, -2, 0.3f));
+    REQUIRE(Ndc(Project(turnedBoth, centre)).x == Approx(0.0f).margin(1e-5));
 }
