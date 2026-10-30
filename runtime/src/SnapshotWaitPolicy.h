@@ -2,8 +2,11 @@
 
 #pragma once
 
+#include "GraphicsTypes.h"
+
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 
 // How long the encoder worker waits for an application's snapshot before it
 // drops the frame, factored out of VideoEncoder so the switching is
@@ -80,6 +83,42 @@ inline bool RecordSnapshotWait(SnapshotWaitState& state, const SnapshotWaitSetti
         return true;
     }
     return false;
+}
+
+enum class SnapshotWaitResult
+{
+    Ready,
+    TimedOut,
+    Superseded,
+};
+
+// Waits for a frame's snapshots, both eyes against one deadline, so a stereo
+// frame waits at most budgetNs in total rather than budgetNs per eye. A frame
+// that is ready is then still dropped when isSuperseded says a newer one has
+// finished meanwhile, so the wait never leads to encoding stale content.
+// waitedNs is the time spent waiting; nowNs reads a nanosecond clock.
+template <typename NowNs>
+SnapshotWaitResult WaitForFrameSnapshots(const FrameSource& source, bool stereo, uint64_t budgetNs, NowNs nowNs,
+                                         const std::function<bool()>& isSuperseded, uint64_t& waitedNs)
+{
+    const uint64_t startNs = nowNs();
+    const uint64_t deadlineNs = startNs + budgetNs;
+    bool ready = source.left.sync.WaitForHostReady(budgetNs);
+    if (ready && stereo)
+    {
+        const uint64_t afterLeftNs = nowNs();
+        ready = source.right.sync.WaitForHostReady(afterLeftNs < deadlineNs ? deadlineNs - afterLeftNs : 0);
+    }
+    waitedNs = nowNs() - startNs;
+    if (!ready)
+    {
+        return SnapshotWaitResult::TimedOut;
+    }
+    if (isSuperseded && isSuperseded())
+    {
+        return SnapshotWaitResult::Superseded;
+    }
+    return SnapshotWaitResult::Ready;
 }
 
 } // namespace oxrsys

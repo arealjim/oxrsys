@@ -516,11 +516,6 @@ void EncodeWaitForFrameImage(id<MTLCommandBuffer> commandBuffer, const FrameImag
     }
 }
 
-bool WaitForHostFrameImage(const FrameImageSource& source, uint64_t timeoutNs)
-{
-    return source.sync.WaitForHostReady(timeoutNs);
-}
-
 bool IsFiniteRatio(float value)
 {
     return std::isfinite(value) && value > 0.0f && value <= 1.0f;
@@ -1633,7 +1628,7 @@ bool VideoEncoder::Encode(FrameImageSource imageSource, int64_t timestampNs, OnN
     @autoreleasepool
     {
         submitted = EncodeInternal(std::move(frameSource), false, timestampNs,
-                                   std::move(callback), std::move(frameCallback));
+                                   std::move(callback), std::move(frameCallback), {});
     }
     return submitted;
 }
@@ -1674,13 +1669,13 @@ bool VideoEncoder::FlushPendingFrames(std::chrono::milliseconds timeout)
 }
 
 bool VideoEncoder::EncodeStereo(FrameSource frameSource, int64_t timestampNs, OnNalUnitCallback callback,
-                                 OnFrameEncodedCallback frameCallback)
+                                 OnFrameEncodedCallback frameCallback, std::function<bool()> isSuperseded)
 {
     bool submitted = false;
     @autoreleasepool
     {
         submitted = EncodeInternal(std::move(frameSource), true, timestampNs,
-                                   std::move(callback), std::move(frameCallback));
+                                   std::move(callback), std::move(frameCallback), isSuperseded);
     }
     return submitted;
 }
@@ -1692,7 +1687,8 @@ bool VideoEncoder::EncodeStereo(FrameSource frameSource, int64_t timestampNs, On
 // queue's 64 the next commandBuffer call blocked the encoder for good.
 bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
                                    int64_t timestampNs, OnNalUnitCallback callback,
-                                   OnFrameEncodedCallback frameCallback)
+                                   OnFrameEncodedCallback frameCallback,
+                                   const std::function<bool()>& isSuperseded)
 {
     if (!frameSource.left.IsValid() ||
         (stereo && !frameSource.right.IsValid()))
@@ -1739,15 +1735,20 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
     // The long wait cannot pile up latency: frameQueue_ is latest-only
     // (StreamingFrameQueue::PushLatest), so while this worker waits, newer
     // frames replace one another in its single pending slot and the next one
-    // encoded is the newest. A frame that is already done returns at once. The
-    // wait is still bounded, so a GPU that hangs or a swapchain being torn down
-    // lets the worker go: below about 10 fps the frame is dropped.
+    // encoded is the newest. Both eyes share one deadline, so a stereo frame
+    // waits at most the one budget. A frame that is ready but whose successor
+    // has also finished meanwhile is stale and dropped, so the newer one is
+    // encoded next. A frame that is already done returns at once. The wait is
+    // still bounded, so a GPU that hangs or a swapchain being torn down lets
+    // the worker go: below about 10 fps the frame is dropped.
     const uint64_t snapshotWaitNs = oxrsys::SnapshotWaitNs(snapshotWait_, snapshotWaitSettings_);
-    const auto snapshotWaitStart = Clock::now();
-    const bool snapshotReady = WaitForHostFrameImage(frameSource.left, snapshotWaitNs) &&
-                               (!stereo || WaitForHostFrameImage(frameSource.right, snapshotWaitNs));
-    const uint64_t snapshotWaitedNs = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                          Clock::now() - snapshotWaitStart).count();
+    uint64_t snapshotWaitedNs = 0;
+    const oxrsys::SnapshotWaitResult snapshotResult = oxrsys::WaitForFrameSnapshots(
+        frameSource, stereo, snapshotWaitNs,
+        [] { return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                 Clock::now().time_since_epoch()).count(); },
+        isSuperseded, snapshotWaitedNs);
+    const bool snapshotReady = snapshotResult != oxrsys::SnapshotWaitResult::TimedOut;
     if (oxrsys::RecordSnapshotWait(snapshotWait_, snapshotWaitSettings_, snapshotReady, snapshotWaitedNs))
     {
         // Each switch is counted; a line goes out for the first and then at most one a second, carrying the switches
@@ -1786,6 +1787,11 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
             metrics.frameDropped = true;
             frameCallback(metrics);
         }
+        return false;
+    }
+    if (snapshotResult == oxrsys::SnapshotWaitResult::Superseded)
+    {
+        // Not an encoder drop: the caller counts it as a replaced frame, as the latest-only queue does.
         return false;
     }
 

@@ -133,8 +133,11 @@ public:
 
     // Encode two backend-native texture/image sources side-by-side (left eye | right eye)
     // The combined image has double the width of a single eye
+    // isSuperseded is asked once the snapshots are ready; when it returns true a newer frame has
+    // finished meanwhile, and this one is not encoded and EncodeStereo returns false.
     bool EncodeStereo(FrameSource frameSource, int64_t timestampNs, OnNalUnitCallback callback,
-                      OnFrameEncodedCallback frameCallback = {});
+                      OnFrameEncodedCallback frameCallback = {},
+                      std::function<bool()> isSuperseded = {});
 
     // Force a keyframe on the next encode
     void ForceKeyframe();
@@ -166,7 +169,8 @@ private:
 
     bool EncodeInternal(FrameSource frameSource, bool stereo,
                         int64_t timestampNs, OnNalUnitCallback callback,
-                        OnFrameEncodedCallback frameCallback);
+                        OnFrameEncodedCallback frameCallback,
+                        const std::function<bool()>& isSuperseded);
     bool AcquireSlot(size_t& outSlotIndex);
     void ReleaseSlot(size_t slotIndex);
     void DestroySlots();

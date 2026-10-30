@@ -3,14 +3,20 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "SnapshotWaitPolicy.h"
+#include "StreamingFrameQueue.h"
 
 #include <cstdint>
+#include <memory>
+#include <utility>
+#include <vector>
 
 using oxrsys::RecordSnapshotWait;
 using oxrsys::SnapshotWaitNs;
 using oxrsys::SnapshotWaitSettings;
 using oxrsys::SnapshotWaitSettingsForFps;
+using oxrsys::SnapshotWaitResult;
 using oxrsys::SnapshotWaitState;
+using oxrsys::WaitForFrameSnapshots;
 
 namespace
 {
@@ -26,6 +32,41 @@ SnapshotWaitSettings TestSettings()
     settings.enterLongAfterLate = 3;
     settings.leaveLongAfterOnTime = 5;
     return settings;
+}
+
+// A clock that moves only when a fake fence is waited on, so the wait tests run
+// in no real time.
+struct FakeClock
+{
+    uint64_t nowNs = 0;
+};
+
+// A host fence that finishes at doneAtNs on the fake clock. Waiting on it
+// advances the clock to doneAtNs, or by the whole timeout if that comes first,
+// and records each timeout it was given.
+FrameImageSource FakeFencedImage(FakeClock& clock, uint64_t doneAtNs, std::vector<uint64_t>& timeouts)
+{
+    FrameImageSource source = {};
+    source.image = std::make_shared<int>(0);
+    source.sync.kind = FrameSyncKind::HostFence;
+    source.sync.waitForReady = [&clock, doneAtNs, &timeouts](uint64_t timeoutNs) {
+        timeouts.push_back(timeoutNs);
+        if (clock.nowNs + timeoutNs < doneAtNs)
+        {
+            clock.nowNs += timeoutNs;
+            return false;
+        }
+        clock.nowNs = std::max(clock.nowNs, doneAtNs);
+        return true;
+    };
+    return source;
+}
+
+SnapshotWaitResult WaitOnFakeClock(const FrameSource& source, FakeClock& clock, uint64_t budgetNs,
+                                   const std::function<bool()>& isSuperseded, uint64_t& waitedNs)
+{
+    return WaitForFrameSnapshots(source, true, budgetNs, [&clock] { return clock.nowNs; }, isSuperseded,
+                                 waitedNs);
 }
 } // namespace
 
@@ -188,4 +229,116 @@ TEST_CASE("Snapshot wait: streaks saturate instead of wrapping", "[snapshot-wait
     }
     CHECK(state.lateStreak == settings.enterLongAfterLate);
     CHECK(state.longWait);
+}
+
+TEST_CASE("Snapshot wait: both eyes share one deadline", "[snapshot-wait]")
+{
+    FakeClock clock;
+    std::vector<uint64_t> leftTimeouts;
+    std::vector<uint64_t> rightTimeouts;
+    FrameSource frame = {};
+    // Each eye alone would fit the 100 ms budget; together they do not.
+    frame.left = FakeFencedImage(clock, 70 * kMs, leftTimeouts);
+    frame.right = FakeFencedImage(clock, 140 * kMs, rightTimeouts);
+
+    uint64_t waitedNs = 0;
+    CHECK(WaitOnFakeClock(frame, clock, 100 * kMs, {}, waitedNs) == SnapshotWaitResult::TimedOut);
+    CHECK(waitedNs <= 100 * kMs);
+    CHECK(clock.nowNs == 100 * kMs);
+    REQUIRE(leftTimeouts.size() == 1);
+    CHECK(leftTimeouts[0] == 100 * kMs);
+    REQUIRE(rightTimeouts.size() == 1);
+    CHECK(rightTimeouts[0] == 30 * kMs);
+}
+
+TEST_CASE("Snapshot wait: the right eye gets what the left eye left of the budget", "[snapshot-wait]")
+{
+    for (const uint64_t leftDoneMs : {0ull, 10ull, 60ull, 99ull, 100ull})
+    {
+        FakeClock clock;
+        std::vector<uint64_t> leftTimeouts;
+        std::vector<uint64_t> rightTimeouts;
+        FrameSource frame = {};
+        frame.left = FakeFencedImage(clock, leftDoneMs * kMs, leftTimeouts);
+        frame.right = FakeFencedImage(clock, 100 * kMs, rightTimeouts);
+
+        uint64_t waitedNs = 0;
+        CHECK(WaitOnFakeClock(frame, clock, 100 * kMs, {}, waitedNs) == SnapshotWaitResult::Ready);
+        CHECK(waitedNs == 100 * kMs);
+        REQUIRE(rightTimeouts.size() == 1);
+        CHECK(rightTimeouts[0] == (100 - leftDoneMs) * kMs);
+    }
+}
+
+TEST_CASE("Snapshot wait: a left eye that times out leaves the right eye unwaited", "[snapshot-wait]")
+{
+    FakeClock clock;
+    std::vector<uint64_t> leftTimeouts;
+    std::vector<uint64_t> rightTimeouts;
+    FrameSource frame = {};
+    frame.left = FakeFencedImage(clock, 500 * kMs, leftTimeouts);
+    frame.right = FakeFencedImage(clock, 0, rightTimeouts);
+
+    uint64_t waitedNs = 0;
+    CHECK(WaitOnFakeClock(frame, clock, 100 * kMs, {}, waitedNs) == SnapshotWaitResult::TimedOut);
+    CHECK(waitedNs == 100 * kMs);
+    CHECK(rightTimeouts.empty());
+}
+
+TEST_CASE("Snapshot wait: a frame whose successor finished during the wait is not encoded", "[snapshot-wait]")
+{
+    FakeClock clock;
+    std::vector<uint64_t> timeouts;
+    StreamingFrameQueue queue;
+    queue.Start();
+
+    // Frame 1 finishes at 40 ms. While it is waited on, the application submits
+    // frame 2 and its GPU finishes it too.
+    FrameSource older = {};
+    older.left = FakeFencedImage(clock, 40 * kMs, timeouts);
+    older.right = FakeFencedImage(clock, 40 * kMs, timeouts);
+    const auto waitOnOlder = older.left.sync.waitForReady;
+    older.left.sync.waitForReady = [&](uint64_t timeoutNs) {
+        StreamingFrame newer = {};
+        newer.frameIndex = 2;
+        newer.source.left = FakeFencedImage(clock, 30 * kMs, timeouts);
+        newer.source.right = FakeFencedImage(clock, 30 * kMs, timeouts);
+        queue.PushLatest(std::move(newer));
+        return waitOnOlder(timeoutNs);
+    };
+
+    uint64_t waitedNs = 0;
+    CHECK(WaitOnFakeClock(older, clock, 100 * kMs, [&] { return queue.HasFinishedPendingFrame(); }, waitedNs) ==
+          SnapshotWaitResult::Superseded);
+    CHECK(waitedNs == 40 * kMs);
+}
+
+TEST_CASE("Snapshot wait: a frame is still encoded when its successor has not finished", "[snapshot-wait]")
+{
+    // An application whose GPU frame outlasts the panel period always has its
+    // next frame submitted before this one is done. Dropping for that would
+    // drop every frame; this one is still the newest finished picture.
+    FakeClock clock;
+    std::vector<uint64_t> timeouts;
+    StreamingFrameQueue queue;
+    queue.Start();
+
+    FrameSource older = {};
+    older.left = FakeFencedImage(clock, 40 * kMs, timeouts);
+    older.right = FakeFencedImage(clock, 40 * kMs, timeouts);
+    StreamingFrame newer = {};
+    newer.frameIndex = 2;
+    newer.source.left = FakeFencedImage(clock, 80 * kMs, timeouts);
+    newer.source.right = FakeFencedImage(clock, 80 * kMs, timeouts);
+    queue.PushLatest(std::move(newer));
+
+    uint64_t waitedNs = 0;
+    const auto isSuperseded = [&] { return queue.HasFinishedPendingFrame(); };
+    CHECK(WaitOnFakeClock(older, clock, 100 * kMs, isSuperseded, waitedNs) == SnapshotWaitResult::Ready);
+    // Checking the newer frame did not wait for it.
+    CHECK(clock.nowNs == 40 * kMs);
+
+    queue.Clear();
+    clock.nowNs = 0;
+    CHECK(WaitOnFakeClock(older, clock, 100 * kMs, isSuperseded, waitedNs) == SnapshotWaitResult::Ready);
 }
