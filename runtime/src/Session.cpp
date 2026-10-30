@@ -628,7 +628,7 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
 
     FrameSource frameSource = {};
     bool hasProjectionLayer = false;
-    uint32_t projectionLayerIndex = UINT32_MAX;
+    uint32_t projectionLayerIndex = 0;
 
     for (uint32_t i = 0; i < frameEndInfo->layerCount; i++)
     {
@@ -665,10 +665,7 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
                     return result;
                 }
                 hasProjectionLayer = true;
-                if (projectionLayerIndex == UINT32_MAX)
-                {
-                    projectionLayerIndex = i;
-                }
+                projectionLayerIndex = i;
                 break;
             }
             case XR_TYPE_COMPOSITION_LAYER_QUAD:

@@ -3201,6 +3201,70 @@ TEST_CASE("EndFrame rejects composition paths without a compositor", "[runtime][
     XR_CHECK(xrDestroySwapchain(swapchain));
 }
 
+TEST_CASE("EndFrame composites a quad over the single projection layer it streams", "[runtime][frame][layers]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+    XrSwapchain swapchain = CreateColorSwapchain(context.session, SelectColorSwapchainFormat(context.session));
+    uint32_t imageIndex = 0;
+    XR_CHECK(xrAcquireSwapchainImage(swapchain, nullptr, &imageIndex));
+    XrSwapchainImageWaitInfo waitInfo = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+    waitInfo.timeout = 0;
+    XR_CHECK(xrWaitSwapchainImage(swapchain, &waitInfo));
+    XR_CHECK(xrReleaseSwapchainImage(swapchain, nullptr));
+
+    XrCompositionLayerProjectionView firstViews[2] = {};
+    for (auto& view : firstViews)
+    {
+        view.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
+        view.pose.orientation.w = 1.0f;
+        view.fov = {-0.5f, 0.5f, 0.5f, -0.5f};
+        view.subImage.swapchain = swapchain;
+        view.subImage.imageRect.extent = {16, 16};
+    }
+    XrCompositionLayerProjectionView secondViews[2] = {firstViews[0], firstViews[1]};
+    secondViews[0].pose.position.x = 1.0f;
+    secondViews[1].pose.position.x = 1.0f;
+    XrCompositionLayerProjection firstProjection = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    firstProjection.space = context.localSpace;
+    firstProjection.viewCount = 2;
+    firstProjection.views = firstViews;
+    XrCompositionLayerProjection secondProjection = firstProjection;
+    secondProjection.views = secondViews;
+
+    XrCompositionLayerQuad quadLayer = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+    quadLayer.space = context.localSpace;
+    quadLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    quadLayer.pose.orientation.w = 1.0f;
+    quadLayer.pose.position.z = -1.0f;
+    quadLayer.size = {1.0f, 1.0f};
+    quadLayer.subImage.swapchain = swapchain;
+    quadLayer.subImage.imageRect.extent = {16, 16};
+
+    // An overlay is placed with the poses of the projection layer whose images are
+    // streamed, so a frame never mixes one projection layer's poses with another's images.
+    const XrCompositionLayerBaseHeader* layers[] = {
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&firstProjection),
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayer),
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&secondProjection),
+    };
+    XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+    XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
+    XR_BEGIN_FRAME_CHECK(xrBeginFrame(context.session, nullptr));
+    XrFrameEndInfo frameEndInfo = {XR_TYPE_FRAME_END_INFO};
+    frameEndInfo.displayTime = frameState.predictedDisplayTime;
+    frameEndInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    frameEndInfo.layerCount = 3;
+    frameEndInfo.layers = layers;
+    CHECK(xrEndFrame(context.session, &frameEndInfo) == XR_ERROR_LAYER_LIMIT_EXCEEDED);
+
+    XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
+    XR_BEGIN_FRAME_CHECK(xrBeginFrame(context.session, nullptr));
+    frameEndInfo.displayTime = frameState.predictedDisplayTime;
+    frameEndInfo.layerCount = 2;
+    CHECK(xrEndFrame(context.session, &frameEndInfo) == XR_SUCCESS);
+    XR_CHECK(xrDestroySwapchain(swapchain));
+}
+
 TEST_CASE("XR_KHR_convert_timespec_time bridges CLOCK_MONOTONIC and XrTime", "[runtime][timespec]")
 {
     // Both conversion directions must be resolvable and must round-trip losslessly.
