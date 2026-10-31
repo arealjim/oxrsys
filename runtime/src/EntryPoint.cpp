@@ -248,6 +248,7 @@ static std::vector<ExtensionInfo> GetSupportedExtensionInfos()
 #ifdef XR_USE_TIMESPEC
         {XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME, XR_KHR_convert_timespec_time_SPEC_VERSION},
 #endif
+        {XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME, XR_KHR_composition_layer_cylinder_SPEC_VERSION},
         {XR_EXT_HAND_TRACKING_EXTENSION_NAME, XR_EXT_hand_tracking_SPEC_VERSION},
         {XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME, XR_EXT_conformance_automation_SPEC_VERSION},
         {XR_EXT_HAND_INTERACTION_EXTENSION_NAME, XR_EXT_hand_interaction_SPEC_VERSION},

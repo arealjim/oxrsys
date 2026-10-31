@@ -122,6 +122,12 @@ private:
     XrResult ValidateProjectionLayer(const XrCompositionLayerProjection& layer,
                                      FrameSource& frameSource) const;
     XrResult ValidateQuadLayer(const XrCompositionLayerQuad& layer) const;
+    XrResult ValidateCylinderLayer(const XrCompositionLayerCylinderKHR& layer) const;
+    // Turns the quad and cylinder layers submitted after the projection layer
+    // into overlays drawn into each eye before encode. Never fails the frame:
+    // an overlay that cannot be placed this frame is skipped.
+    void AppendOverlayLayers(const XrFrameEndInfo& frameEndInfo, uint32_t projectionLayerIndex,
+                             FrameSource& frameSource) const;
 
     uint64_t handle_ = 0;
     Instance* instance_;
