@@ -48,7 +48,8 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(SERVER_FEATURE_STREAM_RECONFIGURE == 0x00000010);
     STATIC_REQUIRE(CLIENT_CAPABILITY_STREAM_RECONFIGURE == 0x00000010);
 
-    STATIC_REQUIRE(sizeof(TrackingPacket) == 1168);
+    // controllerProfile and touchState end at 1176, already a multiple of the struct's int64 alignment.
+    STATIC_REQUIRE(sizeof(TrackingPacket) == 1176);
     STATIC_REQUIRE(TRACKING_PACKET_BASE_SIZE == 1008);
     STATIC_REQUIRE(offsetof(TrackingPacket, headLinearVelocity) == 152);
     STATIC_REQUIRE(offsetof(TrackingPacket, headAngularVelocity) == 164);
@@ -69,6 +70,8 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(offsetof(TrackingPacket, leftControllerAimAngularVelocity) == 1132);
     STATIC_REQUIRE(offsetof(TrackingPacket, rightControllerAimLinearVelocity) == 1144);
     STATIC_REQUIRE(offsetof(TrackingPacket, rightControllerAimAngularVelocity) == 1156);
+    STATIC_REQUIRE(offsetof(TrackingPacket, controllerProfile) == 1168);
+    STATIC_REQUIRE(offsetof(TrackingPacket, touchState) == 1172);
     STATIC_REQUIRE(TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE == 0x0004);
     STATIC_REQUIRE(TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE == 0x0008);
     STATIC_REQUIRE(TRACKING_FLAG_HEAD_LINEAR_VELOCITY_VALID == 0x0010);

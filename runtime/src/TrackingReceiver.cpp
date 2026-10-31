@@ -225,6 +225,17 @@ void TrackingReceiver::Reset()
 static constexpr size_t kMinTrackingPacketSize =
     oxr::protocol::TRACKING_PACKET_BASE_SIZE;
 
+// controllerProfile and touchState were appended last. Only a packet that reaches the end of touchState carries
+// them; a shorter one is from a client that does not send them.
+static void ClearFieldsBeyond(oxr::protocol::TrackingPacket& packet, size_t received)
+{
+    if (received < offsetof(oxr::protocol::TrackingPacket, touchState) + sizeof(packet.touchState))
+    {
+        packet.controllerProfile = oxr::protocol::CONTROLLER_PROFILE_UNKNOWN;
+        packet.touchState = 0;
+    }
+}
+
 void TrackingReceiver::ReceiveThread()
 {
     uint8_t buffer[sizeof(oxr::protocol::TrackingPacket)];
@@ -285,6 +296,7 @@ void TrackingReceiver::InjectPacket(const uint8_t* data, size_t size)
             packet.trackingFlags &= ~field.flag;
         }
     }
+    ClearFieldsBeyond(packet, size);
     StorePacket(packet, SteadyClockNowNs());
 }
 
