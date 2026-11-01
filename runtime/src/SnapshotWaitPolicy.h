@@ -2,8 +2,11 @@
 
 #pragma once
 
+#include "GraphicsTypes.h"
+
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 
 // How long the encoder worker waits for an application's snapshot before it
 // drops the frame, factored out of VideoEncoder so the switching is
@@ -80,6 +83,48 @@ inline bool RecordSnapshotWait(SnapshotWaitState& state, const SnapshotWaitSetti
         return true;
     }
     return false;
+}
+
+enum class SnapshotWaitResult
+{
+    Ready,
+    TimedOut,
+    Superseded,
+};
+
+// Waits for a frame's snapshots, its overlay layers and both eyes against one
+// deadline, so a frame waits at most budgetNs in total rather than budgetNs per
+// image. A frame that is ready is then still dropped when isSuperseded says a
+// newer one has finished meanwhile, so the wait never leads to encoding stale
+// content.
+// waitedNs is the time spent waiting; nowNs reads a nanosecond clock.
+template <typename NowNs>
+SnapshotWaitResult WaitForFrameSnapshots(const FrameSource& source, bool stereo, uint64_t budgetNs, NowNs nowNs,
+                                         const std::function<bool()>& isSuperseded, uint64_t& waitedNs)
+{
+    const uint64_t startNs = nowNs();
+    const uint64_t deadlineNs = startNs + budgetNs;
+    // Each wait gets what the waits before it left of the budget.
+    const auto waitWithinBudget = [&](const FrameImageSource& image) {
+        const uint64_t waitStartNs = nowNs();
+        return image.sync.WaitForHostReady(waitStartNs < deadlineNs ? deadlineNs - waitStartNs : 0);
+    };
+    bool ready = true;
+    for (const auto& overlay : source.overlays)
+    {
+        ready = ready && waitWithinBudget(overlay.image);
+    }
+    ready = ready && waitWithinBudget(source.left) && (!stereo || waitWithinBudget(source.right));
+    waitedNs = nowNs() - startNs;
+    if (!ready)
+    {
+        return SnapshotWaitResult::TimedOut;
+    }
+    if (isSuperseded && isSuperseded())
+    {
+        return SnapshotWaitResult::Superseded;
+    }
+    return SnapshotWaitResult::Ready;
 }
 
 } // namespace oxrsys
